@@ -1,0 +1,9 @@
+version: 1
+id: dewa
+name: Dewa
+url: https://dewa.gov.ae/en/consumer/my-account/login
+profile: default
+inputs: {}
+steps:
+  - id: step-1
+    instruction: Let User do the authentication

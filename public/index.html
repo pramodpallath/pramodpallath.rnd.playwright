@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flow Studio</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+  <aside>
+    <div class="brand"><span class="brand-icon">↗</span><div><strong>Flow Studio</strong><small>Playwright · YAML · OpenRouter</small></div></div>
+    <button id="new-flow" class="primary">+ New flow</button>
+    <div id="flow-list" class="flow-list"></div>
+    <p class="sidebar-note">Plans are learned once and replayed. LLM calls happen only for missing plans or explicit repair.</p>
+  </aside>
+  <main>
+    <div id="notice" role="status" hidden></div>
+    <section id="empty" class="empty"><span class="eyebrow">YOUR AUTOMATION WORKSPACE</span><h1>From instructions<br>to repeatable flows.</h1><p>Add a name and URL, describe your steps in YAML, and let Playwright run the saved plan.</p><button id="empty-new" class="primary">Create your first flow</button></section>
+    <section id="workspace" hidden>
+      <header><div><span class="eyebrow">FLOW WORKSPACE</span><h1 id="flow-name"></h1><p id="flow-url"></p></div><button id="save" class="primary">Save YAML</button></header>
+      <div class="workspace-grid">
+        <section class="panel editor-panel"><div class="panel-heading"><h2>Flow definition</h2><span id="edit-status" class="badge">Saved</span></div><p class="hint">Edit instructions, reorder steps, or add explicit plans. Changing an instruction clears its learned plan.</p><textarea id="yaml" aria-label="Flow YAML" spellcheck="false"></textarea></section>
+        <div class="right-column">
+          <section class="panel"><div class="panel-heading"><h2>Execution</h2><span class="badge">Persistent browser</span></div><div id="inputs"></div><button id="run" class="primary full">Run flow</button><div class="repair"><label for="repair-step">Repair a step</label><div class="inline"><select id="repair-step"></select><button id="repair">Repair & run</button></div><p class="hint">Starts from the flow URL, replays preceding steps, and resolves the selected step again.</p></div></section>
+          <section class="panel"><div class="panel-heading"><h2>Steps</h2><span id="step-count" class="badge"></span></div><ol id="steps"></ol></section>
+        </div>
+      </div>
+      <section id="run-panel" class="panel run-panel" hidden><div class="panel-heading"><h2>Run activity</h2><div class="inline"><span id="run-status" class="badge"></span><button id="stop">Stop</button></div></div><div id="handoff" hidden><p id="pause-message"></p><input id="pause-input" aria-label="Requested non-secret input" hidden><div id="decisions" class="inline"></div></div><pre id="events" aria-live="polite"></pre><div id="outputs"></div></section>
+    </section>
+  </main>
+  <dialog id="new-dialog"><form id="new-form"><span class="eyebrow">NEW AUTOMATION</span><h2>Create a flow</h2><label>Name<input name="name" placeholder="Create requisition" required maxlength="120"></label><label>Flow ID<input name="id" placeholder="create-requisition" pattern="[a-z0-9][a-z0-9_-]{0,63}" required></label><label>Starting URL<input name="url" type="url" placeholder="https://your-app.example.com" required></label><div class="dialog-actions"><button type="button" id="cancel-new">Cancel</button><button type="submit" class="primary">Create flow</button></div></form></dialog>
+  <script type="module" src="/app.js"></script>
+</body></html>

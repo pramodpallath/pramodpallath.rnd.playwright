@@ -1,0 +1,9 @@
+version: 1
+id: pravasi-chit
+name: pravasi chit
+url: https://pravasi.ksfe.com/
+profile: default
+inputs: {}
+steps:
+  - id: step-1
+    instruction: Click on Login

@@ -1,0 +1,21 @@
+version: 1
+id: example-requisition
+name: Requisition example (set your URL first)
+url: https://example.com
+profile: procurement-user
+inputs:
+  userId:
+    required: true
+  Desc:
+    required: true
+steps:
+  - id: login
+    instruction: "Fill User ID with {userId}; let the user enter their password and complete sign-in."
+  - id: create
+    instruction: "Click on Create"
+  - id: requisition
+    instruction: "Click on Requisition"
+  - id: add-item
+    instruction: "Wait until Add Non Catalog Item is available, then click it"
+  - id: description
+    instruction: "Fill Description with {Desc}"
