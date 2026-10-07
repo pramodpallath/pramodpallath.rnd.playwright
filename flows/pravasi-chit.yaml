@@ -7,3 +7,18 @@ inputs: {}
 steps:
   - id: step-1
     instruction: Click on Login
+    plan:
+      actions:
+        - type: click
+          locator:
+            target:
+              by: role
+              role: link
+              name: Login
+              exact: true
+      expect: []
+    learned:
+      status: candidate
+      at: 2026-10-07T19:38:37.799Z
+  - id: step-2
+    instruction: Set Username as Pramodpv in the new page that is opened

@@ -91,11 +91,10 @@ export async function observe(page: Page): Promise<Observation> {
       if (!frameSelector || await page.locator(frameSelector).count() !== 1) continue;
     }
     const controls = await frame.evaluate(() => {
-      const visible = (el: Element) => {
+      const elements = [...document.querySelectorAll('button,a[href],input,textarea,select,[role],h1,h2,h3')].filter(el => {
         const style = getComputedStyle(el);
         return el.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      };
-      const elements = [...document.querySelectorAll('button,a[href],input,textarea,select,[role],h1,h2,h3')].filter(visible).slice(0, 300);
+      }).slice(0, 300);
       return elements.map(el => {
         const input = el as HTMLInputElement;
         const hint = [input.type, input.name, input.id, input.autocomplete, el.getAttribute('aria-label')].join(' ');

@@ -1,8 +1,10 @@
 import express from 'express';
 import path from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { parseDocument } from 'yaml';
 import { FlowStore, ConflictError } from './store.js';
 import { Runner } from './runner.js';
 import { idSchema, urlSchema } from './schema.js';
@@ -38,17 +40,50 @@ export function createApp(store: FlowStore, runner: Runner) {
     const body = z.object({ source: z.string(), revision: z.string() }).strict().parse(req.body);
     res.json(await store.save(req.params.id as string, body.source, body.revision));
   });
+  app.post('/api/flows/:id/steps', async (req, res) => {
+    const body = z.object({ source: z.string(), revision: z.string(), id: idSchema, instruction: z.string().trim().min(1).max(4000) }).strict().parse(req.body);
+    const document = parseDocument(body.source);
+    if (document.errors.length) throw new Error(document.errors[0].message);
+    document.addIn(['steps'], { id: body.id, instruction: body.instruction });
+    res.json(await store.save(req.params.id as string, document.toString(), body.revision));
+  });
   app.post('/api/flows/:id/run', async (req, res) => {
     const body = z.object({ inputs: z.record(z.string(), z.string()).default({}), repairStep: idSchema.optional() }).strict().parse(req.body);
     const id = idSchema.parse(req.params.id);
     await store.read(id);
     res.status(202).json(runner.start(id, body).view);
   });
-  app.get('/api/runs', (_req, res) => res.json([...runner.runs.values()].map(run => run.view)));
-  app.get('/api/runs/:id', (req, res) => {
+  const runId = z.string().uuid();
+  const runDirectory = (id: string) => path.join(runner.dataDir, 'runs', runId.parse(id));
+  app.get('/api/runs', async (_req, res) => {
+    const views = new Map([...runner.runs.values()].map(run => [run.view.id, run.view]));
+    const entries = await readdir(path.join(runner.dataDir, 'runs'), { withFileTypes: true }).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !runId.safeParse(entry.name).success || views.has(entry.name)) continue;
+      try { views.set(entry.name, JSON.parse(await readFile(path.join(runDirectory(entry.name), 'run.json'), 'utf8'))); }
+      catch { /* Ignore incomplete records; live runs remain available. */ }
+    }
+    res.json([...views.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)));
+  });
+  app.get('/api/runs/:id/llm-log', (req, res) => {
+    res.sendFile(path.join(runDirectory(req.params.id as string), 'llm.jsonl'));
+  });
+  app.get('/api/runs/:id/log', (req, res) => {
+    const id = runId.parse(req.params.id);
+    res.sendFile(path.join(runner.dataDir, 'runs', `${id}.jsonl`));
+  });
+  app.get('/api/runs/:id/screenshots/:file', (req, res) => {
+    const directory = runDirectory(req.params.id as string);
+    const file = z.string().regex(/^\d+-[a-z0-9_-]+-(before|after|paused|failed)\.png$/).parse(req.params.file);
+    res.sendFile(path.join(directory, file));
+  });
+  app.get('/api/runs/:id', async (req, res) => {
+    const directory = runDirectory(req.params.id as string);
     const run = runner.runs.get(req.params.id as string);
-    if (!run) return res.status(404).json({ error: 'Run not found' });
-    res.json(run.view);
+    res.json(run?.view ?? JSON.parse(await readFile(path.join(directory, 'run.json'), 'utf8')));
   });
   app.post('/api/runs/:id/respond', (req, res) => {
     const body = z.object({ decision: z.enum(['continue', 'retry', 'done', 'stop']), value: z.string().optional() }).strict().parse(req.body);
