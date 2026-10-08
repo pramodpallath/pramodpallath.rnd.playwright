@@ -110,3 +110,49 @@ The planner can produce conditional browser prompts when the instruction or
 current observation supplies completion evidence. If it cannot identify an
 authenticated control, it keeps a manual prompt rather than guessing a selector.
 Saved conditional plans replay without another LLM request.
+
+## Runtime structure and extension
+
+`src/runner.ts` coordinates execution, pauses, recovery, and evidence. Browser
+operations are implemented by action adapters in `src/actions/`; the runner
+contains no browser-action dispatch switch. `ask-user` remains a workflow action
+owned by the runner because it controls input collection and manual completion.
+
+Each action adapter binds a typed action to narrow dependencies, then exposes
+`prepare()` and an executable operation. Preparation resolves inputs and checks
+targets before dispatch. Optional `verify()` runs independently so retrying
+verification after manual correction cannot repeat the action. Adapters return
+outputs and messages; they cannot directly change run state. Retry-after-dispatch
+and required-step-outcome policies live alongside each action implementation.
+
+Selection uses a second interface in `src/controls/selection/`: a control can
+prepare, select a value, and verify it. Saved `select` actions choose the native
+select adapter; saved `select-combobox` actions choose the authored combobox
+adapter with explicit option and verification locators. Native selection uses
+option values, not labels. Adapter names appear in run events. There is no
+heuristic fallback after partial interaction and no claim of support for every
+ARIA or application-specific widget. Existing YAML formats remain valid.
+
+To add a browser action, add its schema in `src/schema.ts`, implement its adapter,
+and register it in `src/actions/registry.ts`. The typed registry requires coverage
+of every browser action. Add behavior tests using a local browser fixture.
+Planner generation is a separate capability: update `src/planner.ts` deliberately
+if the planner should produce the new action. Authored actions can exist without
+planner support.
+
+To add a selection implementation, extend `SelectionSpec`, implement the selection
+interface, and register it in `src/controls/selection/registry.ts`. Define how an
+authored action selects that implementation; new configuration needs schema
+validation. The runner requires no widget-specific changes.
+
+Browser profiles, step-page selection, locators, conditions, sensitive controls,
+and observation each have a module under `src/browser/`. `src/browser.ts` keeps
+compatibility exports for existing callers. The condition algorithms, manual
+pause lifecycle, table pagination policy, and existing composite-action retry
+behavior are retained; further changes to those behaviors are separate work.
+In particular, repeatable actions are not necessarily free of side effects:
+combobox selection and paginated extraction can click controls.
+
+Validate changes with `npm run typecheck`, `npm run build`, and `npm test`.
+The tests require installed Chromium and permission to launch local browsers
+and fixture servers.
