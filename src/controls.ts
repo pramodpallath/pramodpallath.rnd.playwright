@@ -42,6 +42,8 @@ export async function extractTable(
     });
     if (!headers.length) headers = current.headers;
     if (!headers.length) throw new Error('Table has no column headers; author explicit columns before extraction');
+    if (headers.some(header => !header) || new Set(headers).size !== headers.length)
+      throw new Error('Table headers must be non-empty and unique');
     if (current.headers.join('|') !== headers.join('|')) throw new Error('Table headers changed during pagination');
     for (const cells of current.rows) {
       if (cells.length !== headers.length) throw new Error('Table row does not match header count');
