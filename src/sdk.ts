@@ -59,7 +59,9 @@ export class WorkflowEngine {
       .map(([name]) => name);
     if (required.length) throw new Error(`Missing required inputs: ${required.join(', ')}`);
 
-    // Each invocation has an isolated flow registry and persistent browser profile.\n    const workspace = path.join(this.dataDir, 'executions', randomUUID());\n    const flowsDir = path.join(workspace, 'flows');
+    // Each invocation has an isolated flow registry and persistent browser profile.
+    const workspace = path.join(this.dataDir, 'executions', randomUUID());
+    const flowsDir = path.join(workspace, 'flows');
     await mkdir(flowsDir, { recursive: true, mode: 0o700 });
     const store = new FlowStore(flowsDir);
     await store.save(flow.id, options.yaml, null);

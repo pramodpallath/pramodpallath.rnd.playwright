@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const idSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/);
 export const urlSchema = z.string().url().refine(value => ['http:', 'https:'].includes(new URL(value).protocol), 'Use an HTTP(S) URL');
-const role = z.enum(['button', 'link', 'textbox', 'combobox', 'checkbox', 'radio', 'heading', 'dialog', 'menuitem', 'option', 'tab', 'row', 'cell', 'spinbutton']);
+const role = z.enum(['button', 'link', 'textbox', 'combobox', 'checkbox', 'radio', 'heading', 'dialog', 'menuitem', 'option', 'tab', 'table', 'row', 'cell', 'spinbutton']);
 const target = z.discriminatedUnion('by', [
   z.object({ by: z.literal('role'), role, name: z.string().min(1), exact: z.boolean().default(true) }).strict(),
   z.object({ by: z.literal('label'), value: z.string().min(1), exact: z.boolean().default(true) }).strict(),

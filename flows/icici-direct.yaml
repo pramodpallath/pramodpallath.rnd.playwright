@@ -1,0 +1,9 @@
+version: 1
+id: icici-direct
+name: icici direct
+url: https://www.icicidirect.com/
+profile: default
+inputs: {}
+steps:
+  - id: step-1
+    instruction: Describe your first action here

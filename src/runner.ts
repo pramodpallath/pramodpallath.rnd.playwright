@@ -2,12 +2,14 @@ import { timestamp } from './timestamp.js';
 import { mkdir, appendFile, writeFile, rename, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { openProfile, StepPages, locate, unique, ensureNonSecret, ensureFillAllowed, waitCondition, conditionsMet, screenshotMasks } from './browser.js';
+import { openProfile, StepPages, waitCondition, conditionsMet, screenshotMasks } from './browser.js';
 import { resolvePlan, type Resolver } from './planner.js';
-import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
+import { planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
 import { diagnoseAndRepair } from './discovery.js';
-import { extractTable, selectCombobox, type TableExtraction } from './controls.js';
+import type { TableExtraction } from './controls.js';
+import { bindAction } from './actions/registry.js';
+import type { ActionContext } from './actions/contract.js';
 import { MasterDataRegistry } from './master-data.js';
 
 export const runLogFile = (run: { startedAt: string; id: string }) => `${run.id}.jsonl`;
@@ -217,10 +219,17 @@ export class Run {
           plan = step.plan!;
           await this.event(`Replaying saved plan: ${step.id}`);
         }
+        const actionContext: ActionContext = {
+          page, inputs: this.inputs, timeoutMs: step.timeoutMs, flowId: flow.id,
+          saveMasterData: dataset => new MasterDataRegistry(path.join(this.dataDir, 'master-data')).save(dataset),
+        };
+        let requiresStepOutcome = false;
         // Editing a YAML file during a run must stop before the next action.
         for (let i = 0; i < plan.actions.length; i++) {
           this.view.actionIndex = i;
-          let action = plan.actions[i];
+          const action = plan.actions[i];
+          const adapter = action.type === 'ask-user' ? undefined : bindAction(action, actionContext);
+          requiresStepOutcome ||= adapter?.requiresStepOutcome ?? false;
           let finished = false;
           while (!finished) {
             this.checkStopped();
@@ -237,66 +246,18 @@ export class Run {
             await this.event(`Starting ${step.id} action ${i + 1}: ${action.type}`);
             let dispatched = false;
             try {
-              // Interpolation and preflight happen before any browser mutation.
-              const value = 'value' in action ? interpolate(action.value, this.inputs) : undefined;
-              if ('locator' in action) {
-                const locator = locate(page, action.locator);
-                await locator.waitFor({ state: 'visible', timeout: step.timeoutMs });
-                await unique(locator);
-                if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
-                else if (['select', 'extract', 'extract-table', 'extract-master-data', 'select-combobox'].includes(action.type)) await ensureNonSecret(locator);
-                if (action.type === 'click') await locator.click({ trial: true });
-              }
+              if (adapter!.controlAdapter) await this.event(`Using control adapter: ${adapter!.controlAdapter}`);
+              const prepared = await adapter!.prepare();
               dispatched = true;
-              switch (action.type) {
-                case 'navigate': await page.goto(interpolate(action.url, this.inputs), { waitUntil: 'load', timeout: step.timeoutMs }); break;
-                case 'click': await locate(page, action.locator).click(); break;
-                case 'fill': await locate(page, action.locator).fill(value!); break;
-                case 'select': await locate(page, action.locator).selectOption(value!); break;
-                case 'check': await locate(page, action.locator).setChecked(action.checked); break;
-                case 'wait': await waitCondition(page, action.condition, this.inputs, step.timeoutMs); break;
-                case 'select-combobox':
-                  await selectCombobox(page, action.locator, action.option, value!, action.verify);
-                  break;
-                case 'extract-master-data': {
-                  const extracted = await extractTable(page, action.locator, {
-                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
-                  });
-                  const registry = new MasterDataRegistry(path.join(this.dataDir, 'master-data'));
-                  await registry.save({
-                    id: action.registry,
-                    sourceWorkflow: flow.id,
-                    capturedAt: new Date().toISOString(),
-                    complete: extracted.complete,
-                    pagesVisited: extracted.pagesVisited,
-                    keyColumn: action.valueColumn,
-                    labelColumn: action.labelColumn,
-                    records: extracted.rows.map(row => {
-                      if (!Object.hasOwn(row, action.valueColumn) || !Object.hasOwn(row, action.labelColumn))
-                        throw new Error('Master data column mapping does not match the extracted table');
-                      return { value: row[action.valueColumn], label: row[action.labelColumn] };
-                    }),
-                  });
-                  await this.event(`Master data ${action.registry} captured: ${extracted.rows.length} records, complete=${extracted.complete}`);
-                  break;
-                }
-                case 'extract-table':
-                  this.view.outputs[action.output] = await extractTable(page, action.locator, {
-                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
-                  });
-                  break;
-                case 'extract': {
-                  const locator = locate(page, action.locator);
-                  this.view.outputs[action.output] = action.source === 'value' ? await locator.inputValue() : (await locator.innerText()).trim();
-                  break;
-                }
-              }
+              const result = await prepared.execute();
+              if (result?.output) this.view.outputs[result.output.name] = result.output.value;
+              if (result?.message) await this.event(result.message);
               finished = true;
               await this.event(`Executed ${step.id} action ${i + 1}: ${action.type}`);
             } catch (error) {
               if (this.stopping) throw error;
               await this.event(`Action ${i + 1} could not complete (${dispatched ? 'after dispatch' : 'before dispatch'})`);
-              const uncertain = dispatched && !['wait', 'extract', 'extract-table', 'extract-master-data', 'fill', 'select', 'select-combobox', 'check'].includes(action.type);
+              const uncertain = dispatched && !adapter!.retryAfterDispatch;
               if (this.options.trial && this.options.autoRepair && !uncertain && this.repairs < (this.options.maxRepairs ?? 3)) {
                 await this.screenshot('failed');
                 try {
@@ -324,12 +285,12 @@ export class Run {
               finished = decision === 'done';
             }
           }
-          if (action.type === 'fill' || action.type === 'select') {
+          if (adapter?.verify) {
             let verified = false;
             while (!verified) {
               this.checkStopped();
               try {
-                await waitCondition(page, { kind: 'value', locator: action.locator, value: action.value }, this.inputs, step.timeoutMs);
+                await adapter.verify();
                 verified = true;
               } catch (error) {
                 if (this.stopping || this.options.trial) throw error;
@@ -337,13 +298,13 @@ export class Run {
               }
             }
             await this.event(`Verified set value: ${step.id} action ${i + 1}`);
-            await this.screenshot('value-set');
+            if (adapter.evidence) await this.screenshot(adapter.evidence);
           }
         }
         delete this.view.actionIndex;
         await this.event(`Waiting for step outcome: ${plan.expect.length} checks (timeout ${step.timeoutMs}ms per check)`);
-        if (this.options.trial && !plan.expect.length && plan.actions.some(action => action.type === 'click' || action.type === 'navigate')) throw new Error('Trial requires an explicit postcondition for browser mutations');
-        if (!plan.expect.length && plan.actions.some(action => action.type === 'click' || action.type === 'navigate')) {
+        if (this.options.trial && !plan.expect.length && requiresStepOutcome) throw new Error('Trial requires an explicit postcondition for browser mutations');
+        if (!plan.expect.length && requiresStepOutcome) {
           await this.pause({ kind: 'verify', message: 'This step has no expected outcome. Confirm in the browser that it completed, then continue. Add plan.expect to verify completion automatically.', choices: ['continue', 'stop'] });
         }
         for (const condition of plan.expect) {

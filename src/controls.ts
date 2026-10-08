@@ -1,5 +1,7 @@
+import { resolveSelection } from './controls/selection/registry.js';
 import type { Page } from 'playwright';
-import { locate, unique, ensureNonSecret } from './browser.js';
+import { locate, unique } from './browser/locators.js';
+import { ensureNonSecret } from './browser/sensitive-controls.js';
 import type { LocatorSpec } from './schema.js';
 
 export type TableRow = Record<string, string>;
@@ -32,13 +34,15 @@ export async function extractTable(
     await ensureNonSecret(table);
 
     const current = await table.evaluate(element => {
-      const cells = (row: Element) => [...row.querySelectorAll(':scope > th, :scope > td')]
-        .map(cell => (cell.textContent ?? '').trim());
       const headerRow = element.querySelector('thead tr') ?? element.querySelector('tr:has(th)');
-      const headers = headerRow ? cells(headerRow) : [];
+      // Keep callbacks self-contained: tsx's named-function helper is not
+      // available inside Playwright's serialized browser execution context.
+      const headers = headerRow ? [...headerRow.querySelectorAll(':scope > th, :scope > td')]
+        .map(cell => (cell.textContent ?? '').trim()) : [];
       const bodyRows = [...element.querySelectorAll('tbody tr')];
       const dataRows = bodyRows.length ? bodyRows : [...element.querySelectorAll('tr')].filter(row => row !== headerRow);
-      return { headers, rows: dataRows.map(cells) };
+      return { headers, rows: dataRows.map(row => [...row.querySelectorAll(':scope > th, :scope > td')]
+        .map(cell => (cell.textContent ?? '').trim())) };
     });
     if (!headers.length) headers = current.headers;
     if (!headers.length) throw new Error('Table has no column headers; author explicit columns before extraction');
@@ -83,24 +87,13 @@ export async function extractTable(
   return { rows, headers, pagesVisited, complete };
 }
 
-/** Custom comboboxes must commit a real option, not merely fill the search text. */
+/** Compatibility entry point for callers outside the action runtime. */
 export async function selectCombobox(
   page: Page, control: LocatorSpec, option: LocatorSpec, value: string, verify?: LocatorSpec,
 ): Promise<void> {
-  const trigger = locate(page, control);
-  await trigger.waitFor({ state: 'visible' });
-  await unique(trigger);
-  await ensureNonSecret(trigger);
-  await trigger.click();
-  const target = locate(page, option);
-  await target.waitFor({ state: 'visible' });
-  await unique(target);
-  await target.click();
-  const selected = verify ? locate(page, verify) : trigger;
-  await selected.waitFor({ state: 'visible' });
-  await unique(selected);
-  const actual = await selected.evaluate(element =>
-    element instanceof HTMLInputElement || element instanceof HTMLSelectElement
-      ? element.value : (element.textContent ?? '').trim());
-  if (actual !== value) throw new Error('Combobox selection was not verified');
+  const adapter = resolveSelection({ adapter: 'authored-combobox', locator: control, option, verify },
+    { page });
+  await adapter.prepare();
+  await adapter.select(value);
+  await adapter.verify(value);
 }
