@@ -130,3 +130,6 @@ export class WorkflowEngine {
     return (await this.start(options)).result;
   }
 }
+
+export { MasterDataRegistry, type MasterDataSet } from './master-data.js';
+export { extractTable, selectCombobox, type TableExtraction } from './controls.js';
