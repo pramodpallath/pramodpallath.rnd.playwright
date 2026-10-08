@@ -60,20 +60,20 @@ export async function extractTable(
       break;
     }
     await unique(next);
-    const before = JSON.stringify(current.rows);
     await next.click();
-    // Do not treat a successful click as evidence that the page changed.
-    await page.waitForFunction(({ tableSelector, previous }) => {
-      const el = document.querySelector(tableSelector);
-      if (!el) return false;
-      const rows = [...el.querySelectorAll('tbody tr')].map(row =>
-        [...row.querySelectorAll('th,td')].map(cell => (cell.textContent ?? '').trim()));
-      return JSON.stringify(rows) !== previous;
-    }, { tableSelector: tableSpec.target.by === 'css' && !tableSpec.frame && !tableSpec.scope ? tableSpec.target.value : '__unavailable__', previous: before }, { timeout: 5000 }).catch(() => {});
-    // The next iteration reads the current table; repeated page data is not proof of progress.
-    const after = await table.locator('tr').allTextContents();
-    if (after.length && JSON.stringify(after) === JSON.stringify(current.rows.map(r => r.join(''))))
-      throw new Error('Pagination did not advance; stopping to avoid repeated extraction');
+    let changed = false;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const visibleRows = await locate(page, tableSpec).locator('tbody tr').allTextContents();
+      if (JSON.stringify(visibleRows.map(text => text.trim())) !==
+          JSON.stringify(current.rows.map(row => row.join('')))) {
+        changed = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    if (!changed) throw new Error('Pagination did not advance; extraction is incomplete');
+
   }
   return { rows, headers, pagesVisited, complete };
 }
