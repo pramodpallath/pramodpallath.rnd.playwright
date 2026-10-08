@@ -1,9 +1,11 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { parseDocument } from 'yaml';
 import { flowSchema, instructionInputs } from './schema.js';
 import { FlowStore } from './store.js';
 import { Runner, type RunView, type Screenshot } from './runner.js';
+import type { TableExtraction } from './controls.js';
 
 export type WorkflowEvent =
   | { type: 'workflow.started'; runId: string; workflowId: string }
@@ -16,7 +18,7 @@ export type WorkflowResult = {
   runId: string;
   workflowId: string;
   status: RunView['status'];
-  outputs: Record<string, string>;
+  outputs: Record<string, string | TableExtraction>;
   screenshots: Array<{ stepId: string; phase: Screenshot['phase']; artifactPath: string; url?: string }>;
 };
 
@@ -57,18 +59,12 @@ export class WorkflowEngine {
       .map(([name]) => name);
     if (required.length) throw new Error(`Missing required inputs: ${required.join(', ')}`);
 
-    const flowsDir = path.join(this.dataDir, 'flows');
+    // Each invocation has an isolated flow registry and persistent browser profile.\n    const workspace = path.join(this.dataDir, 'executions', randomUUID());\n    const flowsDir = path.join(workspace, 'flows');
     await mkdir(flowsDir, { recursive: true, mode: 0o700 });
     const store = new FlowStore(flowsDir);
-    const existing = await store.read(flow.id).catch(error => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw error;
-    });
-    // The SDK never overwrites a workflow that is being used by another caller.
-    if (existing) throw new Error(`Workflow ${flow.id} already exists in this execution workspace; use an isolated dataDir`);
     await store.save(flow.id, options.yaml, null);
 
-    const runner = new Runner(store, this.dataDir);
+    const runner = new Runner(store, workspace);
     const run = runner.start(flow.id, { inputs, headless: options.headless });
     const { id: runId } = run.view;
     let eventCursor = 0;
@@ -94,7 +90,7 @@ export class WorkflowEngine {
       }
       eventCursor = run.view.events.length;
       for (const screenshot of run.view.screenshots.slice(screenshotCursor)) {
-        const artifactPath = path.join(this.dataDir, 'runs', runId, screenshot.file);
+        const artifactPath = path.join(workspace, 'runs', runId, screenshot.file);
         let url: string | undefined;
         try { url = await options.resolveArtifactUrl?.(artifactPath); }
         catch { /* Artifact remains accessible via its local path. */ }
