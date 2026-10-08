@@ -10,6 +10,7 @@ import { Runner, type RunView } from './runner.js';
 import { idSchema, urlSchema } from './schema.js';
 import { discoveryMessageSchema, trialOptionsSchema } from './discovery.js';
 import { TrialTracker } from './trials.js';
+import { decomposeInstructions } from './decomposer.js';
 
 export function createApp(store: FlowStore, runner: Runner) {
   const app = express();
@@ -50,17 +51,23 @@ export function createApp(store: FlowStore, runner: Runner) {
     res.json(await store.save(req.params.id as string, document.toString(), body.revision));
   });
   app.post('/api/flows/:id/discover', async (req, res) => {
-    const { message } = discoveryMessageSchema.parse(req.body);
+    const body = z.object({ message: z.string().trim().min(1).max(12000), revision: z.string() }).strict().parse(req.body);
     const id = idSchema.parse(req.params.id);
     const current = await store.read(id);
+    if (current.revision !== body.revision) throw new ConflictError('Flow changed; reload before discovery');
+    const instructions = await decomposeInstructions(body.message);
     const document = parseDocument(current.source);
     const existing = current.flow.steps;
-    let i = existing.length + 1;
-    while (existing.some(s => s.id === `step-${i}`)) i++;
-    // First placeholder is replaced, rather than kept as a spurious executable step.
-    if (existing.length === 1 && existing[0].instruction === 'Describe your first action here' && !existing[0].plan)
-      document.setIn(['steps', 0, 'instruction'], message);
-    else document.addIn(['steps'], { id: `step-${i}`, instruction: message });
+    const placeholder = existing.length === 1 && existing[0].instruction === 'Describe your first action here' && !existing[0].plan;
+    if (placeholder) document.deleteIn(['steps', 0]);
+    let index = placeholder ? 1 : existing.length + 1;
+    const ids = new Set(existing.map(step => step.id));
+    for (const instruction of instructions) {
+      while (ids.has(`step-${index}`)) index++;
+      const stepId = `step-${index++}`;
+      ids.add(stepId);
+      document.addIn(['steps'], { id: stepId, instruction });
+    }
     res.json(await store.save(id, document.toString(), current.revision));
   });
   const trialSessions = new Map<string, { tracker: TrialTracker; runId?: string; running: boolean }>();
