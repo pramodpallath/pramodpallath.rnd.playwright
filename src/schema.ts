@@ -28,6 +28,13 @@ const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('check'), locator: locatorSchema, checked: z.boolean() }).strict(),
   z.object({ type: z.literal('wait'), condition: conditionSchema }).strict(),
   z.object({ type: z.literal('extract'), locator: locatorSchema, output: idSchema, source: z.enum(['text', 'value']) }).strict(),
+  z.object({ type: z.literal('extract-table'), locator: locatorSchema, output: idSchema,
+    maxRows: z.number().int().min(1).max(10000).default(1000),
+    next: locatorSchema.optional(), maxPages: z.number().int().min(1).max(500).default(1),
+  }).strict(),
+  z.object({ type: z.literal('select-combobox'), locator: locatorSchema, option: locatorSchema,
+    value: z.string(), verify: locatorSchema.optional(),
+  }).strict(),
   z.object({ type: z.literal('ask-user'), mode: z.enum(['browser', 'input']), prompt: z.string().min(1), input: idSchema.optional(),
     until: z.array(conditionSchema).min(1).max(10).optional(), graceMs: z.number().int().min(0).max(30000).optional(),
   }).strict().refine(a => a.mode !== 'input' || !!a.input, 'Input prompts need an input name')
