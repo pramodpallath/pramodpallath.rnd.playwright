@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let token, current, runId, active = false, dirty = false, lastPause = '';
+let token, current, runId, trialId, active = false, dirty = false, lastPause = '';
 async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', 'X-Flow-Token': token ?? '', ...options.headers } });
   const result = await response.json();
@@ -58,7 +58,7 @@ async function refreshDefinition() {
   $('edit-status').textContent = 'Saved';
   renderSteps();
 }
-function setActive(value) { active = value; for (const id of ['run', 'repair', 'save', 'new-flow', 'empty-new', 'add-step']) $(id).disabled = value; $('yaml').readOnly = value; $('stop').hidden = !value; }
+function setActive(value) { active = value; for (const id of ['run', 'repair', 'save', 'new-flow', 'empty-new', 'add-step', 'discover', 'trial-start']) $(id).disabled = value; $('yaml').readOnly = value; $('stop').hidden = !value; }
 async function start(repair = false) {
   if (dirty) throw new Error('Save your YAML before running.');
   const fields = [...$('inputs').querySelectorAll('input')];
@@ -179,3 +179,30 @@ $('save').onclick = guard(async () => {
 $('run').onclick = guard(() => start()); $('repair').onclick = guard(() => start(true));
 $('stop').onclick = guard(async () => { await api(`/api/runs/${runId}/stop`, { method: 'POST', body: '{}' }); });
 guard(async () => { token = (await api('/api/session')).token; await list(); })();
+
+$('discover').onclick = guard(async () => {
+  if (active || dirty) throw new Error('Save current changes and finish the active run first.');
+  const field = $('discovery-message');
+  if (!field.value.trim()) throw new Error('Describe the step to discover.');
+  await api(`/api/flows/${current.flow.id}/discover`, { method: 'POST', body: JSON.stringify({ message: field.value, revision: current.revision }) });
+  field.value = '';
+  await select(current.flow.id, true);
+});
+$('trial-start').onclick = guard(async () => {
+  if (active || dirty) throw new Error('Save changes and finish the current run first.');
+  const inputs = Object.fromEntries([...$('inputs').querySelectorAll('input')].map(i => [i.name, i.value]));
+  const successfulRuns = Number($('trial-passes').value);
+  const trial = await api(`/api/flows/${current.flow.id}/trials`, { method: 'POST', body: JSON.stringify({ inputs, successfulRuns, maxAttempts: Math.max(successfulRuns + 3, 5), maxRepairs: 3, autoRepair: true }) });
+  trialId = trial.id; setActive(true); $('run-panel').hidden = false;
+  const tick = async () => {
+    if (!trialId) return;
+    try {
+      const state = await api(`/api/trials/${trialId}`);
+      $('trial-summary').textContent = `${state.progress.phase} · ${state.progress.consecutivePasses}/${state.progress.required} consecutive passes · ${state.progress.repairs} repairs · ${state.progress.attempts.length} trials`;
+      if (state.runId) { runId = state.runId; renderRun(await api(`/api/runs/${runId}`)); }
+      if (state.running) setTimeout(tick, 800);
+      else { trialId = undefined; runId = undefined; setActive(false); await select(current.flow.id, true); }
+    } catch (error) { notice(error.message); trialId = undefined; setActive(false); }
+  };
+  await tick();
+});

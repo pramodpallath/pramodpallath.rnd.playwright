@@ -8,6 +8,9 @@ import { parseDocument } from 'yaml';
 import { FlowStore, ConflictError } from './store.js';
 import { Runner, type RunView } from './runner.js';
 import { idSchema, urlSchema } from './schema.js';
+import { discoveryMessageSchema, trialOptionsSchema } from './discovery.js';
+import { TrialTracker } from './trials.js';
+import { decomposeInstructions } from './decomposer.js';
 
 export function createApp(store: FlowStore, runner: Runner) {
   const app = express();
@@ -46,6 +49,69 @@ export function createApp(store: FlowStore, runner: Runner) {
     if (document.errors.length) throw new Error(document.errors[0].message);
     document.addIn(['steps'], { id: body.id, instruction: body.instruction });
     res.json(await store.save(req.params.id as string, document.toString(), body.revision));
+  });
+  app.post('/api/flows/:id/discover', async (req, res) => {
+    const body = z.object({ message: z.string().trim().min(1).max(12000), revision: z.string() }).strict().parse(req.body);
+    const id = idSchema.parse(req.params.id);
+    const current = await store.read(id);
+    if (current.revision !== body.revision) throw new ConflictError('Flow changed; reload before discovery');
+    const instructions = await decomposeInstructions(body.message);
+    const document = parseDocument(current.source);
+    const existing = current.flow.steps;
+    const placeholder = existing.length === 1 && existing[0].instruction === 'Describe your first action here' && !existing[0].plan;
+    if (placeholder) document.deleteIn(['steps', 0]);
+    let index = placeholder ? 1 : existing.length + 1;
+    const ids = new Set(existing.map(step => step.id));
+    for (const instruction of instructions) {
+      while (ids.has(`step-${index}`)) index++;
+      const stepId = `step-${index++}`;
+      ids.add(stepId);
+      document.addIn(['steps'], { id: stepId, instruction });
+    }
+    res.json(await store.save(id, document.toString(), current.revision));
+  });
+  const trialSessions = new Map<string, { tracker: TrialTracker; runId?: string; running: boolean }>();
+  app.post('/api/flows/:id/trials', async (req, res) => {
+    const id = idSchema.parse(req.params.id);
+    const options = trialOptionsSchema.parse(req.body);
+    const { flow } = await store.read(id);
+    const missing = Object.entries(flow.inputs).filter(([name, d]) => d.required && !options.inputs[name]).map(([name]) => name);
+    if (missing.length) throw new Error(`Missing required inputs: ${missing.join(', ')}`);
+    if ([...trialSessions.values()].some(s => s.running && runner.runs.get(s.runId ?? '')?.view.flowId === id))
+      return res.status(409).json({ error: 'A trial is already running for this flow' });
+    const tracker = new TrialTracker(options);
+    const sessionId = randomBytes(12).toString('hex');
+    const session = { tracker, runId: undefined as string | undefined, running: true };
+    trialSessions.set(sessionId, session);
+    void (async () => {
+      try {
+        while (session.running && tracker.progress.phase === 'trialing') {
+          const run = runner.start(id, { inputs: options.inputs, headless: options.headless, trial: true, autoRepair: options.autoRepair, maxRepairs: 1 });
+          session.runId = run.view.id;
+          await run.finished;
+          const repaired = run.view.events.some(e => e.message.includes('Candidate repair saved'));
+          const status = run.view.status === 'completed' ? 'passed' : run.view.status === 'stopped' ? 'stopped' : 'failed';
+          tracker.record({ attempt: tracker.progress.attempts.length + 1, runId: run.view.id, status, failedStep: status === 'passed' ? undefined : run.view.stepId, repaired });
+          // Do not loop on persistent failures with no validated repair.
+          if (status === 'failed' && !repaired) tracker.progress.phase = 'blocked';
+          if (tracker.progress.repairs >= options.maxRepairs && status === 'failed') tracker.progress.phase = 'blocked';
+        }
+      } catch { tracker.progress.phase = 'blocked'; }
+      finally { session.running = false; }
+    })();
+    res.status(202).json({ id: sessionId, progress: tracker.progress });
+  });
+  app.get('/api/trials/:id', (req, res) => {
+    const session = trialSessions.get(req.params.id as string);
+    if (!session) return res.status(404).json({ error: 'Trial session not found' });
+    res.json({ id: req.params.id, runId: session.runId, running: session.running, progress: session.tracker.progress });
+  });
+  app.post('/api/trials/:id/stop', async (req, res) => {
+    const session = trialSessions.get(req.params.id as string);
+    if (!session) return res.status(404).json({ error: 'Trial session not found' });
+    session.running = false;
+    if (session.runId) await runner.runs.get(session.runId)?.stop();
+    res.json({ progress: session.tracker.progress });
   });
   app.post('/api/flows/:id/run', async (req, res) => {
     const body = z.object({ inputs: z.record(z.string(), z.string()).default({}), repairStep: idSchema.optional() }).strict().parse(req.body);

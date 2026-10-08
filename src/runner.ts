@@ -6,6 +6,9 @@ import { openProfile, StepPages, locate, unique, ensureNonSecret, ensureFillAllo
 import { resolvePlan, type Resolver } from './planner.js';
 import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
+import { diagnoseAndRepair } from './discovery.js';
+import { extractTable, selectCombobox, type TableExtraction } from './controls.js';
+import { MasterDataRegistry } from './master-data.js';
 
 export const runLogFile = (run: { startedAt: string; id: string }) => `${run.id}.jsonl`;
 export type LlmLogFile = { timestamp?: string; at: string; phase: string; file: string };
@@ -14,12 +17,12 @@ type Decision = 'continue' | 'retry' | 'done' | 'stop';
 type Event = { timestamp?: string; at: string; runId: string; flowId: string; stepId?: string; actionIndex?: number; message: string };
 export type Screenshot = { at: string; stepId: string; phase: 'before' | 'value-set' | 'after' | 'paused' | 'failed'; actionIndex?: number; file: string };
 export type RunView = {
-  id: string; flowId: string; mode: 'run' | 'repair'; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
+  id: string; flowId: string; mode: 'run' | 'repair' | 'trial'; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
   stepId?: string; actionIndex?: number; events: Event[];
   pause?: { kind: 'manual' | 'before-action' | 'uncertain' | 'verify' | 'input'; message: string; choices: Decision[]; input?: string };
-  logFile?: string; llmLogs?: LlmLogFile[]; outputs: Record<string, string>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
+  logFile?: string; llmLogs?: LlmLogFile[]; outputs: Record<string, string | TableExtraction>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
 };
-export type RunOptions = { inputs?: Record<string, string>; repairStep?: string; headless?: boolean };
+export type RunOptions = { inputs?: Record<string, string>; repairStep?: string; headless?: boolean; trial?: boolean; autoRepair?: boolean; maxRepairs?: number };
 
 export class Run {
   readonly view: RunView;
@@ -27,11 +30,12 @@ export class Run {
   private inputs: Record<string, string>;
   private pending?: (decision: Decision, value?: string) => void;
   private stopping = false;
+  private repairs = 0;
   private page?: Page;
   private closeBrowser?: () => Promise<void>;
   constructor(private store: FlowStore, private dataDir: string, flowId: string, private options: RunOptions, private resolver: Resolver) {
     this.inputs = { ...options.inputs };
-    this.view = { id: timestamp(), flowId, mode: options.repairStep ? 'repair' : 'run', status: 'running', events: [], llmLogs: [], outputs: {}, screenshots: [], startedAt: new Date().toISOString() };
+    this.view = { id: timestamp(), flowId, mode: options.trial ? 'trial' : options.repairStep ? 'repair' : 'run', status: 'running', events: [], llmLogs: [], outputs: {}, screenshots: [], startedAt: new Date().toISOString() };
     this.view.logFile = runLogFile(this.view);
     this.finished = this.execute();
   }
@@ -164,6 +168,7 @@ export class Run {
       await this.event('Run started');
       let loaded = await this.store.read(this.view.flowId);
       const flow = loaded.flow;
+      if (this.options.trial && flow.steps.some(s => s.plan?.actions.some(a => a.type === 'ask-user'))) await this.event('Trial contains manual actions; user interaction may be necessary');
       if (this.options.repairStep && !flow.steps.some(s => s.id === this.options.repairStep)) throw new Error('Repair step does not exist');
       for (const [name, definition] of Object.entries(flow.inputs)) {
         if (definition.required && !Object.hasOwn(this.inputs, name)) throw new Error(`Missing required input: ${name}`);
@@ -215,7 +220,7 @@ export class Run {
         // Editing a YAML file during a run must stop before the next action.
         for (let i = 0; i < plan.actions.length; i++) {
           this.view.actionIndex = i;
-          const action = plan.actions[i];
+          let action = plan.actions[i];
           let finished = false;
           while (!finished) {
             this.checkStopped();
@@ -239,7 +244,7 @@ export class Run {
                 await locator.waitFor({ state: 'visible', timeout: step.timeoutMs });
                 await unique(locator);
                 if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
-                else if (['select', 'extract'].includes(action.type)) await ensureNonSecret(locator);
+                else if (['select', 'extract', 'extract-table', 'extract-master-data', 'select-combobox'].includes(action.type)) await ensureNonSecret(locator);
                 if (action.type === 'click') await locator.click({ trial: true });
               }
               dispatched = true;
@@ -250,6 +255,36 @@ export class Run {
                 case 'select': await locate(page, action.locator).selectOption(value!); break;
                 case 'check': await locate(page, action.locator).setChecked(action.checked); break;
                 case 'wait': await waitCondition(page, action.condition, this.inputs, step.timeoutMs); break;
+                case 'select-combobox':
+                  await selectCombobox(page, action.locator, action.option, value!, action.verify);
+                  break;
+                case 'extract-master-data': {
+                  const extracted = await extractTable(page, action.locator, {
+                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
+                  });
+                  const registry = new MasterDataRegistry(path.join(this.dataDir, 'master-data'));
+                  await registry.save({
+                    id: action.registry,
+                    sourceWorkflow: flow.id,
+                    capturedAt: new Date().toISOString(),
+                    complete: extracted.complete,
+                    pagesVisited: extracted.pagesVisited,
+                    keyColumn: action.valueColumn,
+                    labelColumn: action.labelColumn,
+                    records: extracted.rows.map(row => {
+                      if (!Object.hasOwn(row, action.valueColumn) || !Object.hasOwn(row, action.labelColumn))
+                        throw new Error('Master data column mapping does not match the extracted table');
+                      return { value: row[action.valueColumn], label: row[action.labelColumn] };
+                    }),
+                  });
+                  await this.event(`Master data ${action.registry} captured: ${extracted.rows.length} records, complete=${extracted.complete}`);
+                  break;
+                }
+                case 'extract-table':
+                  this.view.outputs[action.output] = await extractTable(page, action.locator, {
+                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
+                  });
+                  break;
                 case 'extract': {
                   const locator = locate(page, action.locator);
                   this.view.outputs[action.output] = action.source === 'value' ? await locator.inputValue() : (await locator.innerText()).trim();
@@ -261,7 +296,24 @@ export class Run {
             } catch (error) {
               if (this.stopping) throw error;
               await this.event(`Action ${i + 1} could not complete (${dispatched ? 'after dispatch' : 'before dispatch'})`);
-              const uncertain = dispatched && !['wait', 'extract', 'fill', 'select', 'check'].includes(action.type);
+              const uncertain = dispatched && !['wait', 'extract', 'extract-table', 'extract-master-data', 'fill', 'select', 'select-combobox', 'check'].includes(action.type);
+              if (this.options.trial && this.options.autoRepair && !uncertain && this.repairs < (this.options.maxRepairs ?? 3)) {
+                await this.screenshot('failed');
+                try {
+                  const repair = await diagnoseAndRepair(page, step, flow, plan, error instanceof Error ? error.name : 'Action preflight failed', entry => this.llmLog(entry));
+                  if (repair.plan.actions.some(a => a.type === 'ask-user')) throw new Error('Repair requires user intervention');
+                  // A changed plan must be replayed from a fresh trial, never jumped into mid-step.
+                  loaded = await this.store.learn(flow.id, step.id, repair.plan, 'candidate', loaded.revision);
+                  this.repairs++;
+                  await this.event(`Candidate repair saved for ${step.id}; restart the trial to verify (${repair.reason})`);
+                  throw new Error('TRIAL_REPAIR_RESTART_REQUIRED');
+                } catch (repairError) {
+                  if (repairError instanceof Error && repairError.message === 'TRIAL_REPAIR_RESTART_REQUIRED') throw repairError;
+                  await this.event('Automatic repair could not be validated; ending this trial safely');
+                  throw new Error('Trial blocked; manual repair needed');
+                }
+              }
+              if (this.options.trial) throw new Error(uncertain ? 'Trial stopped after uncertain action; inspect outcome before retrying' : 'Trial action failed; inspect evidence and repair the rule');
               const decision = await this.pause({
                 kind: uncertain ? 'uncertain' : 'before-action',
                 message: uncertain
@@ -280,7 +332,7 @@ export class Run {
                 await waitCondition(page, { kind: 'value', locator: action.locator, value: action.value }, this.inputs, step.timeoutMs);
                 verified = true;
               } catch (error) {
-                if (this.stopping) throw error;
+                if (this.stopping || this.options.trial) throw error;
                 await this.pause({ kind: 'verify', message: 'The field does not contain the requested value. Correct it in the browser, then retry verification.', choices: ['retry', 'stop'] });
               }
             }
@@ -290,6 +342,7 @@ export class Run {
         }
         delete this.view.actionIndex;
         await this.event(`Waiting for step outcome: ${plan.expect.length} checks (timeout ${step.timeoutMs}ms per check)`);
+        if (this.options.trial && !plan.expect.length && plan.actions.some(action => action.type === 'click' || action.type === 'navigate')) throw new Error('Trial requires an explicit postcondition for browser mutations');
         if (!plan.expect.length && plan.actions.some(action => action.type === 'click' || action.type === 'navigate')) {
           await this.pause({ kind: 'verify', message: 'This step has no expected outcome. Confirm in the browser that it completed, then continue. Add plan.expect to verify completion automatically.', choices: ['continue', 'stop'] });
         }
@@ -299,7 +352,7 @@ export class Run {
             this.checkStopped();
             try { await waitCondition(page, condition, this.inputs, step.timeoutMs); verified = true; }
             catch (error) {
-              if (this.stopping) throw error;
+              if (this.stopping || this.options.trial) throw error;
               await this.pause({ kind: 'verify', message: 'Expected outcome was not reached. Inspect or complete the action manually, then retry verification. The action will not be repeated.', choices: ['retry', 'stop'] });
             }
           }
