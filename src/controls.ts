@@ -64,9 +64,12 @@ export async function extractTable(
     let changed = false;
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
-      const visibleRows = await locate(page, tableSpec).locator('tbody tr').allTextContents();
-      if (JSON.stringify(visibleRows.map(text => text.trim())) !==
-          JSON.stringify(current.rows.map(row => row.join('')))) {
+      const snapshot = await locate(page, tableSpec).evaluate(element => {
+        const rows = [...element.querySelectorAll('tbody tr')];
+        return rows.map(row => [...row.querySelectorAll(':scope > th, :scope > td')]
+          .map(cell => (cell.textContent ?? '').trim()));
+      }).catch(() => [] as string[][]);
+      if (JSON.stringify(snapshot) !== JSON.stringify(current.rows)) {
         changed = true;
         break;
       }
