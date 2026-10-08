@@ -52,6 +52,18 @@ export type Action = Plan['actions'][number];
 export type LocatorSpec = z.infer<typeof locatorSchema>;
 export type Condition = z.infer<typeof conditionSchema>;
 
+export function instructionInputs(flow: Flow): Flow['inputs'] {
+  const inputs = { ...flow.inputs };
+  for (const step of flow.steps) {
+    for (const match of step.instruction.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/g)) {
+      if (!Object.hasOwn(inputs, match[1])) {
+        Object.defineProperty(inputs, match[1], { value: { required: true }, enumerable: true, writable: true, configurable: true });
+      }
+    }
+  }
+  return inputs;
+}
+
 export function interpolate(value: string, inputs: Record<string, string>): string {
   return value.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_, name: string) => {
     if (!Object.hasOwn(inputs, name)) throw new Error(`Missing input: ${name}`);

@@ -1,5 +1,6 @@
 import { chromium, type BrowserContext, type Locator, type Page } from 'playwright';
-import { mkdir, open, unlink } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
+import { acquireProfileLock } from './profile-lock.js';
 import path from 'node:path';
 import type { LocatorSpec, Condition } from './schema.js';
 import { interpolate } from './schema.js';
@@ -24,13 +25,30 @@ export async function unique(locator: Locator) {
   if (count !== 1) throw new Error(`Target must match exactly one element; found ${count}`);
 }
 
-export async function ensureNonSecret(locator: Locator) {
-  const secret = await locator.evaluate(el => {
+// Shared by action preflight and screenshot masking, including framed controls.
+function sensitiveControl(el: Element) {
     const input = el as HTMLInputElement;
-    const hint = [input.type, input.name, input.id, input.autocomplete, el.getAttribute('aria-label')].join(' ');
-    return /password|passwd|otp|one.?time|\bpin\b|secret|token|credit.?card|cc-number|cc-csc/i.test(hint);
-  });
+    const labels = Array.from(input.labels ?? []).map(label => label.textContent).join(' ');
+    const labelledBy = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => el.ownerDocument.getElementById(id)?.textContent ?? '').join(' ');
+    const hint = [input.type, input.name, input.id, input.autocomplete, el.getAttribute('aria-label'), el.getAttribute('placeholder'), labels, labelledBy].join(' ');
+    return /password|passwd|otp|one.?time|\bpin\b|secret|token|credit.?card|cc-/i.test(hint);
+}
+
+export async function ensureNonSecret(locator: Locator) {
+  const secret = await locator.evaluate(sensitiveControl);
   if (secret) throw new Error('Sensitive controls require manual browser entry');
+}
+
+export async function screenshotMasks(page: Page): Promise<Locator[]> {
+  const masks: Locator[] = [];
+  for (const frame of page.frames()) {
+    const controls = frame.locator('input, textarea, select, [contenteditable], [autocomplete], [id*="otp" i], [id*="token" i], [id*="secret" i]');
+    for (let i = 0, count = await controls.count(); i < count; i++) {
+      const control = controls.nth(i);
+      if (await control.evaluate(sensitiveControl)) masks.push(control);
+    }
+  }
+  return masks;
 }
 
 export async function waitCondition(page: Page, condition: Condition, inputs: Record<string, string>, timeoutMs: number) {
@@ -56,23 +74,68 @@ export async function waitCondition(page: Page, condition: Condition, inputs: Re
   throw new Error(`Expected ${condition.kind} condition was not reached`);
 }
 
+const profileCleanup = new Map<string, Promise<void>>();
+
 export async function openProfile(dataDir: string, profile: string, headless = false) {
-  const directory = path.join(dataDir, 'profiles', profile);
+  const directory = path.resolve(dataDir, 'profiles', profile);
+  await profileCleanup.get(directory);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const lockPath = path.join(directory, '.flow-run.lock');
-  const lock = await open(lockPath, 'wx', 0o600).catch(() => {
-    throw new Error(`Profile '${profile}' is already in use. If a previous process crashed, verify it has stopped before removing its .flow-run.lock.`);
-  });
-  await lock.writeFile(String(process.pid));
+  const releaseLock = await acquireProfileLock(directory, profile);
+  const release = () => {
+    const cleanup = releaseLock();
+    profileCleanup.set(directory, cleanup);
+    void cleanup.finally(() => {
+      if (profileCleanup.get(directory) === cleanup) profileCleanup.delete(directory);
+    }).catch(() => {});
+    return cleanup;
+  };
   let context: BrowserContext;
   try {
     context = await chromium.launchPersistentContext(directory, { headless, viewport: { width: 1280, height: 850 } });
-  } catch (error) { await lock.close(); await unlink(lockPath); throw error; }
-  return {
-    context,
-    page: context.pages()[0] ?? await context.newPage(),
-    close: async () => { try { await context.close(); } finally { await lock.close(); await unlink(lockPath).catch(() => {}); } },
-  };
+  } catch (error) { await release(); throw error; }
+  context.once('close', () => { void release().catch(() => {}); });
+  try {
+    const page = context.pages()[0] ?? await context.newPage();
+    let closing: Promise<void> | undefined;
+    return {
+      context, page,
+      close: () => closing ??= (async () => { try { await context.close(); } finally { await release(); } })(),
+    };
+  } catch (error) { await context.close(); await release(); throw error; }
+}
+
+// Select at step boundaries so a click's own outcome checks stay on its page.
+// Only pages opened during this run can become the next step's target.
+export class StepPages {
+  private seen: Set<Page>;
+  private current: Page;
+  private initialUrl: string;
+  constructor(private context: BrowserContext, private initial: Page) {
+    this.current = initial;
+    this.initialUrl = initial.url();
+    this.seen = new Set(context.pages());
+  }
+
+  async select(instruction: string, timeoutMs: number): Promise<Page> {
+    const requestsNewPage = /\b(?:in|on|within|to)\s+(?:(?:the|a|this|that)\s+)?(?:new\s+(?:browser\s+)?(?:page|tab|window)\b|newly\s+opened\s+(?:page|tab|window)\b|pop[ -]?up\b)/i.test(instruction);
+    let candidates = this.context.pages().filter(page => !page.isClosed() && !this.seen.has(page));
+    // A same-tab navigation also satisfies "the new page". Once selected,
+    // a popup stays active for subsequent steps that refer to that page.
+    if (!candidates.length && requestsNewPage && this.current === this.initial && this.current.url() === this.initialUrl) {
+      try {
+        await this.context.waitForEvent('page', { timeout: timeoutMs });
+      } catch {
+        throw new Error('No new page opened before the step timeout');
+      }
+      candidates = this.context.pages().filter(page => !page.isClosed() && !this.seen.has(page));
+    }
+    if (candidates.length > 1) throw new Error('Multiple new pages opened; the next step target is ambiguous');
+    if (candidates.length === 1) this.current = candidates[0];
+    if (this.current.isClosed()) throw new Error('The active page was closed; stop and restart the flow');
+    await this.current.waitForLoadState('domcontentloaded', { timeout: timeoutMs });
+    for (const page of candidates) this.seen.add(page);
+    return this.current;
+  }
 }
 
 export type Candidate = { id: string; label: string; tag: string; locator: LocatorSpec; options?: { label: string; value: string }[] };

@@ -21,4 +21,4 @@ steps:
       status: candidate
       at: 2026-10-07T19:38:37.799Z
   - id: step-2
-    instruction: Set Username as Pramodpv in the new page that is opened
+    instruction: Set Username as {Pramodpv} in the new page that is opened

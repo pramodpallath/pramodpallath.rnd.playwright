@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rename, writeFile, unlink } from 'node:fs/pro
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseDocument, stringify } from 'yaml';
-import { flowSchema, idSchema, type Flow, type Plan } from './schema.js';
+import { flowSchema, idSchema, instructionInputs, type Flow, type Plan } from './schema.js';
 
 export class ConflictError extends Error {}
 export const revision = (source: string) => createHash('sha256').update(source).digest('hex');
@@ -30,6 +30,7 @@ export class FlowStore {
     const document = parseDocument(source);
     if (document.errors.length) throw new Error(document.errors[0].message);
     const flow = flowSchema.parse(document.toJS());
+    flow.inputs = instructionInputs(flow);
     if (flow.id !== id) throw new Error('Flow ID must match its filename');
     return { flow, source, revision: revision(source) };
   }
@@ -44,6 +45,9 @@ export class FlowStore {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
       if ((previous?.revision ?? null) !== expected) throw new ConflictError('Flow changed; reload before saving');
+      for (const [name, definition] of Object.entries(instructionInputs(flow))) {
+        if (!Object.hasOwn(flow.inputs, name)) document.setIn(['inputs', name], definition);
+      }
       // An edited instruction must never silently reuse the previous learned actions.
       for (let i = 0; i < flow.steps.length; i++) {
         const step = flow.steps[i];

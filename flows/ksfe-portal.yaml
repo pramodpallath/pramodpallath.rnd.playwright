@@ -1,0 +1,25 @@
+version: 1
+id: ksfe-portal
+name: ksfe portal
+url: https://portal.pravasi.ksfe.com/
+profile: default
+inputs: { UserName: { required: true }, Password: { required: true } }
+steps:
+  - id: step-1
+    instruction: Set {UserName}
+    plan:
+      actions:
+        - type: fill
+          locator:
+            target:
+              by: role
+              role: textbox
+              name: Username
+              exact: true
+          value: "{UserName}"
+      expect: []
+    learned:
+      status: verified
+      at: 2026-10-08T01:32:37.894Z
+  - id: step-2
+    instruction: Set {Password}

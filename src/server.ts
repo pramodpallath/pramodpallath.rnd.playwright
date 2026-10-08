@@ -50,7 +50,9 @@ export function createApp(store: FlowStore, runner: Runner) {
   app.post('/api/flows/:id/run', async (req, res) => {
     const body = z.object({ inputs: z.record(z.string(), z.string()).default({}), repairStep: idSchema.optional() }).strict().parse(req.body);
     const id = idSchema.parse(req.params.id);
-    await store.read(id);
+    const { flow } = await store.read(id);
+    const missing = Object.entries(flow.inputs).filter(([name, definition]) => definition.required && (!Object.hasOwn(body.inputs, name) || body.inputs[name] === '')).map(([name]) => name);
+    if (missing.length) throw new Error(`Fill required inputs before running: ${missing.join(', ')}`);
     res.status(202).json(runner.start(id, body).view);
   });
   const runId = z.string().uuid();

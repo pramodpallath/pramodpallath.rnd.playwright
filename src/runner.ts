@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, appendFile, writeFile, rename, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { openProfile, locate, unique, ensureNonSecret, waitCondition } from './browser.js';
+import { openProfile, StepPages, locate, unique, ensureNonSecret, waitCondition, screenshotMasks } from './browser.js';
 import { resolvePlan, type Resolver } from './planner.js';
 import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
 
 type Decision = 'continue' | 'retry' | 'done' | 'stop';
 type Event = { at: string; runId: string; flowId: string; stepId?: string; actionIndex?: number; message: string };
-export type Screenshot = { at: string; stepId: string; phase: 'before' | 'after' | 'paused' | 'failed'; file: string };
+export type Screenshot = { at: string; stepId: string; phase: 'before' | 'value-set' | 'after' | 'paused' | 'failed'; actionIndex?: number; file: string };
 export type RunView = {
   id: string; flowId: string; mode: 'run' | 'repair'; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
   stepId?: string; actionIndex?: number; events: Event[];
@@ -67,9 +67,10 @@ export class Run {
     try {
       await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
       await this.page.screenshot({ path: destination, timeout: 5000, animations: 'disabled',
-        mask: [this.page.locator('input, textarea, [contenteditable], [autocomplete*="cc-"], [id*="otp" i], [id*="token" i], [id*="secret" i]')] });
+        mask: await screenshotMasks(this.page) });
       await chmod(destination, 0o600);
-      this.view.screenshots.push({ at: new Date().toISOString(), stepId: this.view.stepId, phase, file });
+      this.view.screenshots.push({ at: new Date().toISOString(), stepId: this.view.stepId, phase, file,
+        ...(phase === 'value-set' ? { actionIndex: this.view.actionIndex } : {}) });
       await this.event(`Screenshot saved: ${this.view.stepId} (${phase})`);
     } catch { await this.event(`Screenshot unavailable: ${this.view.stepId} (${phase})`); }
   }
@@ -117,14 +118,21 @@ export class Run {
       }
       await this.event('Opening browser and loading flow URL');
       const browser = await openProfile(this.dataDir, flow.profile, this.options.headless);
-      let closed = false;
-      close = async () => { if (!closed) { closed = true; await browser.close(); } };
+      let closing: Promise<void> | undefined;
+      close = () => closing ??= browser.close();
       this.closeBrowser = close;
+      browser.context.once('close', () => {
+        if (!closing && (this.view.status === 'running' || this.view.status === 'paused')) {
+          this.stopping = true;
+          this.pending?.('stop');
+        }
+      });
       this.checkStopped();
       const page = browser.page;
       this.page = page;
       page.setDefaultTimeout(30000);
       await page.goto(flow.url, { waitUntil: 'load', timeout: 30000 });
+      const pages = new StepPages(browser.context, page);
       await this.event('Browser opened with persistent profile');
       for (const step of flow.steps) {
         this.checkStopped();
@@ -132,6 +140,9 @@ export class Run {
         delete this.view.actionIndex;
         const stepStarted = Date.now();
         await this.event(`Started step ${step.id}: ${step.instruction}`);
+        const page = await pages.select(step.instruction, step.timeoutMs);
+        if (this.page !== page) await this.event('Switched to the newly opened page');
+        this.page = page;
         await this.screenshot('before');
         page.setDefaultTimeout(step.timeoutMs);
         let plan: Plan;
@@ -175,7 +186,7 @@ export class Run {
               switch (action.type) {
                 case 'navigate': await page.goto(interpolate(action.url, this.inputs), { waitUntil: 'load', timeout: step.timeoutMs }); break;
                 case 'click': await locate(page, action.locator).click(); break;
-                case 'fill': await locate(page, action.locator).fill(value!); await waitCondition(page, { kind: 'value', locator: action.locator, value: action.value }, this.inputs, step.timeoutMs); break;
+                case 'fill': await locate(page, action.locator).fill(value!); break;
                 case 'select': await locate(page, action.locator).selectOption(value!); break;
                 case 'check': await locate(page, action.locator).setChecked(action.checked); break;
                 case 'wait': await waitCondition(page, action.condition, this.inputs, step.timeoutMs); break;
@@ -201,6 +212,21 @@ export class Run {
               finished = decision === 'done';
             }
           }
+          if (action.type === 'fill' || action.type === 'select') {
+            let verified = false;
+            while (!verified) {
+              this.checkStopped();
+              try {
+                await waitCondition(page, { kind: 'value', locator: action.locator, value: action.value }, this.inputs, step.timeoutMs);
+                verified = true;
+              } catch (error) {
+                if (this.stopping) throw error;
+                await this.pause({ kind: 'verify', message: 'The field does not contain the requested value. Correct it in the browser, then retry verification.', choices: ['retry', 'stop'] });
+              }
+            }
+            await this.event(`Verified set value: ${step.id} action ${i + 1}`);
+            await this.screenshot('value-set');
+          }
         }
         delete this.view.actionIndex;
         await this.event(`Waiting for step outcome: ${plan.expect.length} checks (timeout ${step.timeoutMs}ms per check)`);
@@ -223,6 +249,9 @@ export class Run {
         if (learned) loaded = await this.store.learn(flow.id, step.id, plan, 'verified', loaded.revision);
         await this.event(`Completed step ${step.id}${plan.expect.length ? ' with outcome checks' : ' (no authored outcome checks)'}`);
       }
+      this.checkStopped();
+      await close();
+      this.checkStopped();
       this.view.status = 'completed';
       this.view.finishedAt = new Date().toISOString();
       await this.event('Run completed');
@@ -251,5 +280,9 @@ export class Runner {
     this.runs.set(run.view.id, run);
     return run;
   }
-  async stopAll() { await Promise.all([...this.runs.values()].map(run => run.stop())); }
+  async stopAll() {
+    const runs = [...this.runs.values()];
+    await Promise.all(runs.map(run => run.stop()));
+    await Promise.all(runs.map(run => run.finished));
+  }
 }

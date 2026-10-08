@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 import { FlowStore, ConflictError } from '../src/store.js';
 import { Runner, type Run } from '../src/runner.js';
 import { createApp } from '../src/server.js';
-import { observe } from '../src/browser.js';
+import { observe, StepPages, screenshotMasks, type Observation } from '../src/browser.js';
 import type { Plan } from '../src/schema.js';
 
 let server: Server, url: string, root: string;
@@ -22,10 +22,12 @@ const plan: Plan = { actions: [
 before(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'flow-tests-'));
   server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html');
     const html = '<!doctype html><title>Fixture</title><h1>Requisition</h1><label>Description<input id="desc"></label><label>Password<input type="password" id="password"></label><button id="create">Create</button><script>localStorage.setItem("visits",String(Number(localStorage.getItem("visits")||0)+1))</script>';
     if (req.url === '/login') { res.end('<button onclick="setTimeout(()=>document.body.innerHTML=\'<h1>Sign in</h1>\',600)">Login</button>'); return; }
     if (req.url === '/popup') { res.end('<a href="/username" target="_blank">Open login</a>'); return; }
     if (req.url === '/username') { res.end('<label>Username<input id="username"></label>'); return; }
+    if (req.url === '/reject-value') { res.end('<label>Description<input id="desc" oninput="this.value=\'\'"></label>'); return; }
     if (req.url === '/slow') { setTimeout(() => { res.end(html); }, 1000); return; }
     res.setHeader('Content-Type', 'text/html'); res.end(html);
   });
@@ -34,9 +36,9 @@ before(async () => {
 });
 
 test('username instructions resolve on the opened popup and replay without the LLM', async () => {
-  const directory = path.join(root, 'popup-literal');
+  const directory = path.join(root, 'popup-username');
   const store = new FlowStore(path.join(directory, 'flows'));
-  await store.save('popup-literal', stringify({ version: 1, id: 'popup-literal', name: 'Popup literal', url: `${url}/popup`, inputs: { Username: { required: true } }, steps: [
+  await store.save('popup-username', stringify({ version: 1, id: 'popup-username', name: 'Popup username', url: `${url}/popup`, inputs: { Username: { required: true } }, steps: [
     { id: 'open', instruction: 'Click Open login', plan: { actions: [{ type: 'click', locator: { target: { by: 'text', value: 'Open login' } } }], expect: [{ kind: 'visible', locator: { target: { by: 'text', value: 'Open login' } } }] } },
     { id: 'username', instruction: 'Set Username as {Username} in the new page that is opened', timeoutMs: 2000 },
   ] }), null);
@@ -44,28 +46,64 @@ test('username instructions resolve on the opened popup and replay without the L
   const key = process.env.OPENROUTER_API_KEY, model = process.env.OPENROUTER_MODEL;
   process.env.OPENROUTER_API_KEY = 'fixture-api-key'; process.env.OPENROUTER_MODEL = 'fixture-model';
   let calls = 0;
+  let observed: Observation | undefined;
   globalThis.fetch = async (input, init) => {
     if (input !== 'https://openrouter.ai/api/v1/chat/completions') return originalFetch(input, init);
     calls++;
     const request = JSON.parse(String(init?.body));
     const observation = JSON.parse(request.messages[1].content).observation;
-    assert.equal(observation.url, `${url}/username`);
-    const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Username').id;
+    observed = observation;
+    const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Username')?.id ?? null;
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Username}', url: null, checked: null, output: null, source: null, condition: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Username}' }], unresolvedReason: null }) } }] }));
   };
   try {
     const runner = new Runner(store, directory);
-    await complete(runner.start('popup-literal', { headless: true, inputs: { Username: 'Pramodpv' } }));
-    const saved = (await store.read('popup-literal')).flow.steps[1];
+    const first = runner.start('popup-username', { headless: true, inputs: { Username: 'Pramodpv' } });
+    await first.finished;
+    assert.equal(observed?.url, `${url}/username`);
+    assert.equal(first.view.status, 'completed', JSON.stringify(first.view.events));
+    const saved = (await store.read('popup-username')).flow.steps[1];
     assert.equal(saved.learned?.status, 'verified');
     assert.equal(saved.plan?.actions[0].type, 'fill');
-    await complete(runner.start('popup-literal', { headless: true, inputs: { Username: 'AnotherUser' } }));
+    await complete(runner.start('popup-username', { headless: true, inputs: { Username: 'AnotherUser' } }));
     assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
     if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key;
     if (model === undefined) delete process.env.OPENROUTER_MODEL; else process.env.OPENROUTER_MODEL = model;
   }
+});
+
+test('step page selection waits for delayed popups and rejects missing or ambiguous pages', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    const initial = await context.newPage();
+    await initial.goto(`${url}/popup`);
+    const pages = new StepPages(context, initial);
+    // Opening a popup is an action on the current page, not a request to
+    // wait for a popup before that action has executed.
+    assert.equal(await pages.select('Click Open new tab', 100), initial);
+    await initial.evaluate(() => { setTimeout(() => window.open('/username'), 150); });
+    const popup = await pages.select('Set Username as {Username} in the new page that is opened', 2000);
+    assert.notEqual(popup, initial);
+    assert.equal(popup.url(), `${url}/username`);
+    assert.equal(await pages.select('Set Username in the new page', 100), popup);
+    await context.newPage(); await context.newPage();
+    await assert.rejects(pages.select('Fill Username', 100), /Multiple new pages/);
+    await context.close();
+
+    const sameTab = await browser.newContext();
+    const page = await sameTab.newPage();
+    await page.goto(`${url}/popup`);
+    const navigation = new StepPages(sameTab, page);
+    await assert.rejects(navigation.select('Fill Username in the new page', 100), /No new page opened/);
+    await page.goto(`${url}/username`);
+    assert.equal(await navigation.select('Fill Username in the new page', 100), page);
+    await page.close();
+    await assert.rejects(navigation.select('Fill Username', 100), /active page was closed/);
+    await sameTab.close();
+  } finally { await browser.close(); }
 });
 after(async () => { await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
 
@@ -94,6 +132,89 @@ test('saved plans execute in Chromium with zero resolver calls', async () => {
   assert.equal(run.view.outputs.description, 'Office supplies');
   assert.ok(!(await readFile(path.join(directory, 'runs', `${run.view.id}.jsonl`), 'utf8')).includes('Office supplies'));
 });
+
+test('set-value screenshots show the verified value and still mask passwords', async () => {
+  const { store, directory } = await setup('value-screenshot');
+  let expected: Buffer | undefined;
+  const runner = new Runner(store, directory, async page => {
+    const capture = page.screenshot.bind(page);
+    page.screenshot = async options => {
+      if (await page.locator('#desc').inputValue() === 'Visible username') {
+        expected = await capture({ animations: 'disabled', mask: [page.locator('#password')] });
+      }
+      return capture(options);
+    };
+    // Match KSFE's saved plan: fill with no authored outcome checks.
+    return { actions: [{ type: 'fill', locator: description, value: '{Desc}' }], expect: [] };
+  });
+  const run = runner.start('value-screenshot', { headless: true, inputs: { Desc: 'Visible username' } });
+  await complete(run);
+  const screenshot = run.view.screenshots.findLast(s => s.phase === 'after')!;
+  assert.ok(expected);
+  assert.ok((await readFile(path.join(directory, 'runs', run.view.id, screenshot.file))).equals(expected),
+    'The screenshot must display the filled field and mask only sensitive controls');
+  const verified = run.view.events.findIndex(e => e.message.includes('Verified set value'));
+  assert.ok(verified >= 0, 'Fills must record successful value verification');
+  assert.ok(verified < run.view.events.findIndex(e => e.message.includes('Screenshot saved') && e.message.includes('value-set')));
+});
+
+test('a rejected fill pauses verification without capturing a successful value-set screenshot', async () => {
+  const { store, directory } = await setup('rejected-value', { actions: [{ type: 'fill', locator: description, value: '{Desc}' }], expect: [] });
+  const saved = await store.read('rejected-value');
+  await store.save('rejected-value', saved.source.replace(url, `${url}/reject-value`), saved.revision);
+  const run = new Runner(store, directory).start('rejected-value', { headless: true, inputs: { Desc: 'Requested value' } });
+  try {
+    await until(() => run.view.pause?.kind === 'verify');
+    assert.deepEqual(run.view.pause?.choices, ['retry', 'stop']);
+    assert.ok(!run.view.screenshots.some(s => s.phase === 'value-set' || s.phase === 'after'));
+    assert.ok(!run.view.events.some(e => e.message.includes('Verified set value')));
+    run.respond('retry');
+    await until(() => run.view.pause?.kind === 'verify');
+    assert.equal(run.view.events.filter(e => e.message.includes('Starting') && e.message.includes('action')).length, 1);
+  } finally { await run.stop(); await run.finished; }
+});
+
+test('screenshot masks detect sensitive labels and framed fields without hiding usernames', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<label>Username<input id="username"></label><label>PIN<input id="code"></label><input id="card" autocomplete="cc-exp"><iframe id="login"></iframe>');
+    await page.frameLocator('#login').locator('body').evaluate(el => { el.innerHTML = '<label>Username<input id="frame-user"></label><input id="frame-password" type="password"><input id="frame-otp" autocomplete="one-time-code">'; });
+    const masks = await screenshotMasks(page);
+    assert.deepEqual(await Promise.all(masks.map(mask => mask.getAttribute('id'))), ['code', 'card', 'frame-password', 'frame-otp']);
+  } finally { await browser.close(); }
+});
+
+for (const outcome of ['completed', 'failed', 'stopped'] as const) {
+  test(`a ${outcome} run closes its browser and popups and releases the profile`, async () => {
+    const { store, directory } = await setup(`close-${outcome}`);
+    let context: import('playwright').BrowserContext | undefined;
+    let pages: import('playwright').Page[] = [];
+    const runner = new Runner(store, directory, async page => {
+      context = page.context();
+      await page.evaluate(() => window.open('/username'));
+      await until(() => context!.pages().length === 2);
+      pages = context.pages();
+      if (outcome === 'failed') throw new Error('Fixture resolver failed');
+      return outcome === 'stopped'
+        ? { actions: [{ type: 'ask-user', mode: 'browser', prompt: 'Wait for Stop' }], expect: [] }
+        : plan;
+    });
+    const run = runner.start(`close-${outcome}`, { headless: true, inputs: { Desc: 'x' } });
+    try {
+      if (outcome === 'stopped') {
+        await until(() => run.view.pause?.kind === 'manual');
+        await Promise.all([run.stop(), run.stop()]);
+      }
+      await run.finished;
+      assert.equal(run.view.status, outcome, JSON.stringify(run.view.events));
+      assert.equal(pages.length, 2);
+      assert.ok(pages.every(page => page.isClosed()));
+      assert.equal(context!.pages().length, 0);
+      await assert.rejects(readFile(path.join(directory, 'profiles', `close-${outcome}`, '.flow-run.lock')), { code: 'ENOENT' });
+    } finally { await run.stop(); await run.finished; }
+  });
+}
 
 test('missing plan is learned and persisted; subsequent replay bypasses resolver', async () => {
   const { store, directory } = await setup('learn');
@@ -263,7 +384,7 @@ test('LLM requests and responses are logged with secrets redacted and remain acc
         await page.locator('.flow-card').click();
         await page.locator('#run-history button').click();
         await page.getByRole('link', { name: 'Open LLM log' }).waitFor();
-        assert.equal(await page.locator('#run-artifacts img').count(), 2);
+        assert.equal(await page.locator('#run-artifacts img').count(), 3);
         assert.deepEqual(errors, []);
       } finally { await browser.close(); }
 

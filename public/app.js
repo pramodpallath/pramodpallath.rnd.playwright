@@ -23,7 +23,7 @@ async function list() {
   }));
 }
 async function select(id, preserveInputs = false) {
-  const previous = {};
+  const previous = Object.create(null);
   if (preserveInputs) $('inputs').querySelectorAll('input').forEach(input => previous[input.name] = input.value);
   current = await api(`/api/flows/${encodeURIComponent(id)}`);
   $('empty').hidden = true; $('workspace').hidden = false;
@@ -32,6 +32,7 @@ async function select(id, preserveInputs = false) {
   $('inputs').replaceChildren(...Object.entries(current.flow.inputs).map(([name, definition]) => {
     const label = node('label', `${name}${definition.required ? ' *' : ''}`);
     const input = document.createElement('input'); input.name = name; input.value = previous[name] ?? ''; input.autocomplete = 'off';
+    input.required = definition.required;
     label.append(input); return label;
   }));
   renderSteps();
@@ -59,7 +60,13 @@ async function refreshDefinition() {
 function setActive(value) { active = value; for (const id of ['run', 'repair', 'save', 'new-flow', 'empty-new', 'add-step']) $(id).disabled = value; $('yaml').readOnly = value; $('stop').hidden = !value; }
 async function start(repair = false) {
   if (dirty) throw new Error('Save your YAML before running.');
-  const inputs = {};
+  const fields = [...$('inputs').querySelectorAll('input')];
+  const missing = fields.filter(input => input.required && input.value === '');
+  if (missing.length) {
+    missing[0].focus();
+    throw new Error(`Fill required inputs before running: ${missing.map(input => input.name).join(', ')}`);
+  }
+  const inputs = Object.create(null);
   $('inputs').querySelectorAll('input').forEach(input => { if (input.value !== '') inputs[input.name] = input.value; });
   notice(''); lastPause = '';
   const run = await api(`/api/flows/${current.flow.id}/run`, { method: 'POST', body: JSON.stringify({ inputs, ...(repair ? { repairStep: $('repair-step').value } : {}) }) });
@@ -105,7 +112,7 @@ function renderRun(run) {
       $('run-artifacts').append(llm);
     }
     for (const screenshot of run.screenshots ?? []) {
-      const link = node('a', `${screenshot.stepId} · ${screenshot.phase}`);
+      const link = node('a', `${screenshot.stepId} · ${screenshot.phase}${screenshot.actionIndex !== undefined ? ` · action ${screenshot.actionIndex + 1}` : ''}`);
       link.href = `/api/runs/${run.id}/screenshots/${encodeURIComponent(screenshot.file)}`; link.target = '_blank';
       const image = document.createElement('img'); image.src = link.href; image.alt = link.textContent; image.loading = 'lazy';
       link.append(image); $('run-artifacts').append(link);
