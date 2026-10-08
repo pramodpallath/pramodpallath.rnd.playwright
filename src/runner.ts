@@ -1,20 +1,23 @@
-import { randomUUID } from 'node:crypto';
+import { timestamp } from './timestamp.js';
 import { mkdir, appendFile, writeFile, rename, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { openProfile, StepPages, locate, unique, ensureNonSecret, waitCondition, screenshotMasks } from './browser.js';
+import { openProfile, StepPages, locate, unique, ensureNonSecret, ensureFillAllowed, waitCondition, screenshotMasks } from './browser.js';
 import { resolvePlan, type Resolver } from './planner.js';
 import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
 
+export const runLogFile = (run: { startedAt: string; id: string }) => `${run.id}.jsonl`;
+export type LlmLogFile = { timestamp?: string; at: string; phase: string; file: string };
+
 type Decision = 'continue' | 'retry' | 'done' | 'stop';
-type Event = { at: string; runId: string; flowId: string; stepId?: string; actionIndex?: number; message: string };
+type Event = { timestamp?: string; at: string; runId: string; flowId: string; stepId?: string; actionIndex?: number; message: string };
 export type Screenshot = { at: string; stepId: string; phase: 'before' | 'value-set' | 'after' | 'paused' | 'failed'; actionIndex?: number; file: string };
 export type RunView = {
   id: string; flowId: string; mode: 'run' | 'repair'; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
   stepId?: string; actionIndex?: number; events: Event[];
   pause?: { kind: 'manual' | 'before-action' | 'uncertain' | 'verify' | 'input'; message: string; choices: Decision[]; input?: string };
-  outputs: Record<string, string>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
+  logFile?: string; llmLogs?: LlmLogFile[]; outputs: Record<string, string>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
 };
 export type RunOptions = { inputs?: Record<string, string>; repairStep?: string; headless?: boolean };
 
@@ -28,7 +31,8 @@ export class Run {
   private closeBrowser?: () => Promise<void>;
   constructor(private store: FlowStore, private dataDir: string, flowId: string, private options: RunOptions, private resolver: Resolver) {
     this.inputs = { ...options.inputs };
-    this.view = { id: randomUUID(), flowId, mode: options.repairStep ? 'repair' : 'run', status: 'running', events: [], outputs: {}, screenshots: [], startedAt: new Date().toISOString() };
+    this.view = { id: timestamp(), flowId, mode: options.repairStep ? 'repair' : 'run', status: 'running', events: [], llmLogs: [], outputs: {}, screenshots: [], startedAt: new Date().toISOString() };
+    this.view.logFile = runLogFile(this.view);
     this.finished = this.execute();
   }
   private redact(message: string) {
@@ -41,15 +45,26 @@ export class Run {
   private async llmLog(entry: Record<string, unknown>) {
     const directory = path.join(this.dataDir, 'runs', this.view.id);
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const record = { at: new Date().toISOString(), runId: this.view.id, flowId: this.view.flowId, stepId: this.view.stepId, ...entry };
-    await appendFile(path.join(directory, 'llm.jsonl'), this.redact(JSON.stringify(record)) + '\n', { mode: 0o600 });
+    const at = new Date().toISOString();
+    const phase = String(entry.phase ?? 'entry').replace(/[^a-z0-9_-]/gi, '_');
+    const logs = this.view.llmLogs!;
+    const time = timestamp();
+    const file = `${time}-llm-${phase}.json`;
+    const record: Record<string, unknown> = { ...entry, timestamp: time, at, runId: this.view.id, flowId: this.view.flowId, stepId: this.view.stepId };
+    if (typeof record.response === 'string') {
+      try { record.response = JSON.parse(record.response); } catch { /* Preserve non-JSON provider responses. */ }
+    }
+    // Redact compact JSON first so escaped input values are still matched.
+    const redacted = JSON.parse(this.redact(JSON.stringify(record)));
+    await writeFile(path.join(directory, file), JSON.stringify(redacted, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    logs.push({ timestamp: time, at, phase, file });
     await this.event(`LLM ${entry.phase}${entry.durationMs !== undefined ? ` (${entry.durationMs}ms)` : ''}`);
   }
   private async event(message: string) {
-    const event: Event = { at: new Date().toISOString(), runId: this.view.id, flowId: this.view.flowId, stepId: this.view.stepId, actionIndex: this.view.actionIndex, message: this.safe(message) };
+    const event: Event = { timestamp: timestamp(), at: new Date().toISOString(), runId: this.view.id, flowId: this.view.flowId, stepId: this.view.stepId, actionIndex: this.view.actionIndex, message: this.safe(message) };
     this.view.events.push(event);
     await mkdir(path.join(this.dataDir, 'runs'), { recursive: true, mode: 0o700 });
-    await appendFile(path.join(this.dataDir, 'runs', `${this.view.id}.jsonl`), JSON.stringify(event) + '\n', { mode: 0o600 });
+    await appendFile(path.join(this.dataDir, 'runs', runLogFile(this.view)), JSON.stringify(event) + '\n', { mode: 0o600 });
     await this.persist();
   }
   private async persist() {
@@ -179,7 +194,8 @@ export class Run {
                 const locator = locate(page, action.locator);
                 await locator.waitFor({ state: 'visible', timeout: step.timeoutMs });
                 await unique(locator);
-                if (['fill', 'select', 'extract'].includes(action.type)) await ensureNonSecret(locator);
+                if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
+                else if (['select', 'extract'].includes(action.type)) await ensureNonSecret(locator);
                 if (action.type === 'click') await locator.click({ trial: true });
               }
               dispatched = true;

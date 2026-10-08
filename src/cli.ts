@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { timestamp, eventTimestamp } from './timestamp.js';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
@@ -18,13 +19,13 @@ async function main() {
   if (command === 'serve') {
     const port = Number(values.port ?? process.env.PORT ?? 4310);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
-    const server = createApp(store, runner).listen(port, '127.0.0.1', () => console.log(`Flow Studio: http://127.0.0.1:${port}`));
+    const server = createApp(store, runner).listen(port, '127.0.0.1', () => console.log(`${timestamp()} Flow Studio: http://127.0.0.1:${port}`));
     let stopping = false;
     const stop = () => {
       if (stopping) return;
       stopping = true;
       server.close();
-      void runner.stopAll().catch(error => { console.error(error); process.exitCode = 1; });
+      void runner.stopAll().catch(error => { console.error(`${timestamp()} ${error instanceof Error ? error.message : 'Shutdown failed'}`); process.exitCode = 1; });
     };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     return;
@@ -49,19 +50,19 @@ async function main() {
   let printed = 0;
   try {
     while (['running', 'paused'].includes(run.view.status)) {
-      for (const event of run.view.events.slice(printed)) console.log(event.message);
+      for (const event of run.view.events.slice(printed)) console.log(`${eventTimestamp(event)} ${event.message}`);
       printed = run.view.events.length;
       if (run.view.pause) {
         const pause = run.view.pause;
-        console.log(pause.message);
+        console.log(`${timestamp()} ${pause.message}`);
         const value = pause.kind === 'input' ? await terminal.question('Value (non-secret): ') : undefined;
         const decision = await terminal.question(`Choose ${pause.choices.join(' / ')}: `);
         if (pause.choices.includes(decision as 'continue')) run.respond(decision as 'continue', value);
       } else await new Promise(resolve => setTimeout(resolve, 200));
     }
     await run.finished;
-    for (const event of run.view.events.slice(printed)) console.log(event.message);
-    console.log(`Result: ${run.view.status}`);
+    for (const event of run.view.events.slice(printed)) console.log(`${eventTimestamp(event)} ${event.message}`);
+    console.log(`${timestamp()} Result: ${run.view.status}`);
     if (Object.keys(run.view.outputs).length) console.log(JSON.stringify(run.view.outputs, null, 2));
     if (run.view.status !== 'completed') process.exitCode = 1;
   } catch (error) {
@@ -74,4 +75,4 @@ async function main() {
   }
 }
 
-main().catch(error => { console.error(error instanceof Error ? error.message : 'Command failed'); process.exitCode = 1; });
+main().catch(error => { console.error(`${timestamp()} ${error instanceof Error ? error.message : 'Command failed'}`); process.exitCode = 1; });

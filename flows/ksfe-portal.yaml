@@ -23,3 +23,15 @@ steps:
       at: 2026-10-08T01:32:37.894Z
   - id: step-2
     instruction: Set {Password}
+    plan:
+      actions:
+        - type: fill
+          locator:
+            target:
+              by: label
+              value: Password
+              exact: true
+          value: "{Password}"
+      expect: []
+  - id: step-3
+    instruction: Click on login

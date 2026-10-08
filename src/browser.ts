@@ -39,6 +39,13 @@ export async function ensureNonSecret(locator: Locator) {
   if (secret) throw new Error('Sensitive controls require manual browser entry');
 }
 
+// Passwords may only come from the named run input, never a literal saved value.
+export async function ensureFillAllowed(locator: Locator, value: string) {
+  const password = await locator.evaluate(el => el instanceof HTMLInputElement && el.type === 'password');
+  if (password && value === '{Password}') return;
+  await ensureNonSecret(locator);
+}
+
 export async function screenshotMasks(page: Page): Promise<Locator[]> {
   const masks: Locator[] = [];
   for (const frame of page.frames()) {
@@ -63,7 +70,8 @@ export async function waitCondition(page: Page, condition: Condition, inputs: Re
   }
   await target.waitFor({ state: 'visible', timeout: timeoutMs });
   await unique(target);
-  await ensureNonSecret(target);
+  if (condition.kind === 'value') await ensureFillAllowed(target, condition.value);
+  else await ensureNonSecret(target);
   const expected = interpolate(condition.value, inputs);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -167,11 +175,11 @@ export async function observe(page: Page): Promise<Observation> {
         const name = (el.getAttribute('aria-label') || labelledBy || labels || el.textContent?.trim() || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').slice(0, 160);
         const tag = el.tagName.toLowerCase();
         const nativeRole = tag === 'button' ? 'button' : tag === 'a' ? 'link' : tag === 'select' ? 'combobox' : /^h[123]$/.test(tag) ? 'heading' : tag === 'textarea' ? 'textbox' : tag === 'input' ? ({ checkbox: 'checkbox', radio: 'radio', number: 'spinbutton', button: 'button', submit: 'button' }[input.type] ?? 'textbox') : '';
-        return { tag, secret, name, label: labels, role: el.getAttribute('role') || nativeRole, id: el.id, testId: el.getAttribute('data-testid'), placeholder: el.getAttribute('placeholder'), options: tag === 'select' ? Array.from((el as HTMLSelectElement).options).map(o => ({ label: o.label, value: o.value })).slice(0, 100) : undefined };
+        return { tag, secret, password: tag === 'input' && input.type === 'password', name, label: labels, role: el.getAttribute('role') || nativeRole, id: el.id, testId: el.getAttribute('data-testid'), placeholder: el.getAttribute('placeholder'), options: tag === 'select' ? Array.from((el as HTMLSelectElement).options).map(o => ({ label: o.label, value: o.value })).slice(0, 100) : undefined };
       });
     });
     for (const control of controls) {
-      if (control.secret) continue;
+      if (control.secret && !control.password) continue;
       if (control.role === 'heading') { headings.push(control.name); continue; }
       const choices: LocatorSpec['target'][] = [];
       if (control.testId) choices.push({ by: 'testId', value: control.testId });

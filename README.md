@@ -4,7 +4,8 @@ In Flow Studio, write `Set username to {UserName}` in a step and save it.
 The Execution panel creates a `UserName` input field automatically. Enter its
 value there before clicking **Run flow** or **Repair & run**. Required inputs
 are checked before starting. Names are case-sensitive. Values are not saved in
-YAML; passwords, OTPs and PINs must be entered directly in the browser.
+YAML. Use `{Password}` to fill a password from the masked Password input;
+OTPs and PINs must be entered directly in the browser.
 
 After each fill or selection, the runner checks that the field contains the
 requested value, records verification, and captures a **value-set** screenshot
@@ -35,7 +36,8 @@ step's `timeoutMs`; same-tab navigation continues on the current page.
 
 The opening step's outcome checks still run on the opening page. Multiple new
 pages, a missing requested popup, or a closed active page stop the run with an
-explanation. Passwords and other sensitive fields still require manual entry.
+explanation. Password fills use `{Password}`; other sensitive fields require
+manual entry. Password values remain masked in screenshots and redacted in logs.
 
 Each finished flow closes its browser, including all tabs and popups, before
 reporting completion. Failed and stopped runs also close the browser. A paused
@@ -52,3 +54,13 @@ flows. Prefer the Stop button or Ctrl+C when restarting.
 An invalid lock owner, an unverifiable Chromium owner, or an interrupted
 recovery (`.flow-run.recovery` exists) requires inspection rather than automatic
 deletion. Profile data is retained during recovery.
+
+Run activity and CLI log lines start with numeric Unix timestamps in
+microseconds. New run IDs and their folder names use the same timestamp:
+`.data/runs/<timestamp>/`. The run event log is `.data/runs/<timestamp>.jsonl`.
+Each LLM request, response, or error is a separate, pretty-printed JSON file
+inside that run folder, named `<timestamp>-llm-<phase>.json`. Timestamps use
+the high-resolution clock and increase for successive entries, so filenames
+sort chronologically. Open individual LLM files from Run activity. Input
+values and API keys remain redacted. Older run folders and logs remain
+accessible from saved run history.

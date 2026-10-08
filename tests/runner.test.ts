@@ -1,13 +1,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { stringify } from 'yaml';
 import { chromium } from 'playwright';
 import { FlowStore, ConflictError } from '../src/store.js';
-import { Runner, type Run } from '../src/runner.js';
+import { Runner, runLogFile, type Run } from '../src/runner.js';
 import { createApp } from '../src/server.js';
 import { observe, StepPages, screenshotMasks, type Observation } from '../src/browser.js';
 import type { Plan } from '../src/schema.js';
@@ -130,7 +130,7 @@ test('saved plans execute in Chromium with zero resolver calls', async () => {
   await complete(run);
   assert.equal(calls, 0);
   assert.equal(run.view.outputs.description, 'Office supplies');
-  assert.ok(!(await readFile(path.join(directory, 'runs', `${run.view.id}.jsonl`), 'utf8')).includes('Office supplies'));
+  assert.ok(!(await readFile(path.join(directory, 'runs', runLogFile(run.view)), 'utf8')).includes('Office supplies'));
 });
 
 test('set-value screenshots show the verified value and still mask passwords', async () => {
@@ -255,7 +255,7 @@ test('navigation timeout after dispatch offers no automatic retry', async () => 
   await run.stop(); await run.finished;
 });
 
-test('password fill is blocked and manual browser handoff resumes', async () => {
+test('password fill using an unrelated input is blocked and manual browser handoff resumes', async () => {
   const { store, directory } = await setup('manual', { actions: [
     { type: 'ask-user', mode: 'browser', prompt: 'Complete sign-in manually.' },
     { type: 'fill', locator: { target: { by: 'css', value: '#password' } }, value: '{Desc}' },
@@ -265,6 +265,47 @@ test('password fill is blocked and manual browser handoff resumes', async () => 
   run.respond('continue');
   await until(() => run.view.pause?.kind === 'before-action');
   await run.stop(); await run.finished;
+});
+
+test('password fill is learned from the Password input and replayed without manual handoff', async () => {
+  const { store, directory } = await setup('password-fill');
+  const loaded = await store.read('password-fill');
+  await store.save('password-fill', loaded.source.replace('Fill Description with {Desc}', 'Set password to {Password}'), loaded.revision);
+  const originalFetch = globalThis.fetch;
+  const key = process.env.OPENROUTER_API_KEY, model = process.env.OPENROUTER_MODEL;
+  process.env.OPENROUTER_API_KEY = 'fixture-key'; process.env.OPENROUTER_MODEL = 'fixture-model';
+  let calls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (input !== 'https://openrouter.ai/api/v1/chat/completions') return originalFetch(input, init);
+    calls++;
+    assert.ok(!String(init?.body).includes('private-password-value'));
+    const request = JSON.parse(String(init?.body));
+    const observation = JSON.parse(request.messages[1].content).observation;
+    const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Password').id;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Password}', url: null, checked: null, output: null, source: null, condition: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Password}' }], unresolvedReason: null }) } }] }));
+  };
+  try {
+    const runner = new Runner(store, directory);
+    const first = runner.start('password-fill', { headless: true, inputs: { Desc: 'unused', Password: 'private-password-value' } });
+    await complete(first);
+    assert.equal(first.view.status, 'completed', JSON.stringify(first.view.events));
+    assert.ok(!first.view.events.some(event => event.message.startsWith('Paused:')));
+    const learned = await store.read('password-fill');
+    assert.equal(learned.flow.steps[0].plan?.actions[0].type, 'fill');
+    assert.ok(!learned.source.includes('private-password-value'));
+    for (const file of first.view.llmLogs!) {
+      assert.ok(!(await readFile(path.join(directory, 'runs', first.view.id, file.file), 'utf8')).includes('private-password-value'));
+    }
+    const second = runner.start('password-fill', { headless: true, inputs: { Desc: 'unused', Password: 'next-password-value' } });
+    await complete(second);
+    assert.equal(second.view.status, 'completed');
+    assert.equal(calls, 1);
+    assert.notEqual(first.view.id, second.view.id);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key;
+    if (model === undefined) delete process.env.OPENROUTER_MODEL; else process.env.OPENROUTER_MODEL = model;
+  }
 });
 
 test('instruction edits invalidate plans; stale saves are rejected; comments survive learning', async () => {
@@ -289,7 +330,8 @@ test('persistent profile retains local storage across runs and excludes sensitiv
     assert.equal(await page.evaluate(() => localStorage.getItem('visits')), '2');
     const observation = await observe(page);
     assert.ok(observation.candidates.some(c => c.label === 'Description'));
-    assert.ok(!JSON.stringify(observation).includes('Password'));
+    assert.ok(observation.candidates.some(c => c.label === 'Password'));
+    assert.ok(!JSON.stringify(observation).includes('not-stored'));
   } finally { await browser.close(); }
 });
 
@@ -359,9 +401,25 @@ test('LLM requests and responses are logged with secrets redacted and remain acc
   try {
     const run = new Runner(store, directory).start('llm-history', { headless: true, inputs: { Desc: 'supplied-value' } });
     await complete(run);
-    const log = await readFile(path.join(directory, 'runs', run.view.id, 'llm.jsonl'), 'utf8');
-    assert.ok(!log.includes('fixture-api-key')); assert.ok(!log.includes('supplied-value'));
-    const entries = log.trim().split('\n').map(line => JSON.parse(line));
+    const files = (await readdir(path.join(directory, 'runs', run.view.id))).filter(file => file.endsWith('.json') && file.includes('-llm-')).sort();
+    assert.equal(files.length, 2);
+    assert.deepEqual(files, run.view.llmLogs!.map(entry => entry.file));
+    const entries = await Promise.all(files.map(async file => {
+      const destination = path.join(directory, 'runs', run.view.id, file);
+      const log = await readFile(destination, 'utf8');
+      assert.ok(log.includes('\n  "'));
+      assert.ok(!log.includes('fixture-api-key')); assert.ok(!log.includes('supplied-value'));
+      assert.equal((await stat(destination)).mode & 0o777, 0o600);
+      const entry = JSON.parse(log);
+      assert.match(entry.timestamp, /^\d{16,20}$/);
+      assert.ok(file.startsWith(entry.timestamp));
+      return entry;
+    }));
+    assert.equal(typeof entries[1].response, 'object');
+    assert.ok(!(await readdir(path.join(directory, 'runs', run.view.id))).includes('llm.jsonl'));
+    assert.match(run.view.id, /^\d{16,20}$/);
+    assert.equal(runLogFile(run.view), `${run.view.id}.jsonl`);
+    assert.ok(BigInt(entries[0].timestamp) < BigInt(entries[1].timestamp));
     assert.deepEqual(entries.map(entry => entry.phase), ['request', 'response']);
     assert.equal(entries[0].request.messages.length, 2);
     assert.equal(entries[1].model, 'fixture-model');
@@ -371,7 +429,17 @@ test('LLM requests and responses are logged with secrets redacted and remain acc
     try {
       const history = await (await fetch(`${address}/api/runs`)).json() as { id: string }[];
       assert.equal(history[0].id, run.view.id);
-      assert.equal((await fetch(`${address}/api/runs/${run.view.id}/llm-log`)).status, 200);
+      const index = await (await fetch(`${address}/api/runs/${run.view.id}/llm-log`)).json();
+      assert.deepEqual(index, run.view.llmLogs);
+      for (const [i, file] of files.entries()) {
+        const response = await fetch(`${address}/api/runs/${run.view.id}/llm-logs/${file}`);
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), entries[i]);
+      }
+      assert.equal((await fetch(`${address}/api/runs/${run.view.id}/llm-logs/invalid.json`)).status, 400);
+      const eventLog = await fetch(`${address}/api/runs/${run.view.id}/log`);
+      assert.equal(eventLog.status, 200);
+      assert.ok((await eventLog.text()).startsWith('{"timestamp":"'));
       const screenshot = run.view.screenshots[0];
       assert.equal((await fetch(`${address}/api/runs/${run.view.id}/screenshots/${screenshot.file}`)).status, 200);
       assert.equal((await fetch(`${address}/api/runs/${run.view.id}`)).status, 200);
@@ -383,7 +451,9 @@ test('LLM requests and responses are logged with secrets redacted and remain acc
         await page.goto(address);
         await page.locator('.flow-card').click();
         await page.locator('#run-history button').click();
-        await page.getByRole('link', { name: 'Open LLM log' }).waitFor();
+        await page.getByRole('link', { name: /LLM request/ }).waitFor();
+        assert.equal(await page.locator('a[href*="/llm-logs/"]').count(), 2);
+        assert.ok((await page.locator('#events').textContent())?.startsWith(run.view.events[0].timestamp!));
         assert.equal(await page.locator('#run-artifacts img').count(), 3);
         assert.deepEqual(errors, []);
       } finally { await browser.close(); }

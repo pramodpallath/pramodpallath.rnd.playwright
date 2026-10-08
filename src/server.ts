@@ -6,7 +6,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { parseDocument } from 'yaml';
 import { FlowStore, ConflictError } from './store.js';
-import { Runner } from './runner.js';
+import { Runner, type RunView } from './runner.js';
 import { idSchema, urlSchema } from './schema.js';
 
 export function createApp(store: FlowStore, runner: Runner) {
@@ -55,7 +55,7 @@ export function createApp(store: FlowStore, runner: Runner) {
     if (missing.length) throw new Error(`Fill required inputs before running: ${missing.join(', ')}`);
     res.status(202).json(runner.start(id, body).view);
   });
-  const runId = z.string().uuid();
+  const runId = z.union([z.string().regex(/^\d{16,20}$/), z.string().uuid()]);
   const runDirectory = (id: string) => path.join(runner.dataDir, 'runs', runId.parse(id));
   app.get('/api/runs', async (_req, res) => {
     const views = new Map([...runner.runs.values()].map(run => [run.view.id, run.view]));
@@ -70,12 +70,22 @@ export function createApp(store: FlowStore, runner: Runner) {
     }
     res.json([...views.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)));
   });
-  app.get('/api/runs/:id/llm-log', (req, res) => {
-    res.sendFile(path.join(runDirectory(req.params.id as string), 'llm.jsonl'));
+  app.get('/api/runs/:id/llm-log', async (req, res) => {
+    const directory = runDirectory(req.params.id as string);
+    const run: RunView = runner.runs.get(req.params.id as string)?.view ?? JSON.parse(await readFile(path.join(directory, 'run.json'), 'utf8'));
+    if (run.llmLogs?.length) return res.json(run.llmLogs);
+    res.sendFile(path.join(directory, 'llm.jsonl'));
   });
-  app.get('/api/runs/:id/log', (req, res) => {
+  app.get('/api/runs/:id/llm-logs/:file', (req, res) => {
+    const directory = runDirectory(req.params.id as string);
+    const file = z.string().regex(/^(?:\d{16,20}-llm-[a-z0-9_-]+|\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-\d{6,}-llm-[a-z0-9_-]+)\.json$/i).parse(req.params.file);
+    res.sendFile(path.join(directory, file));
+  });
+  app.get('/api/runs/:id/log', async (req, res) => {
     const id = runId.parse(req.params.id);
-    res.sendFile(path.join(runner.dataDir, 'runs', `${id}.jsonl`));
+    const directory = runDirectory(id);
+    const run: RunView = runner.runs.get(id)?.view ?? JSON.parse(await readFile(path.join(directory, 'run.json'), 'utf8'));
+    res.sendFile(path.join(runner.dataDir, 'runs', run.logFile ?? `${id}.jsonl`));
   });
   app.get('/api/runs/:id/screenshots/:file', (req, res) => {
     const directory = runDirectory(req.params.id as string);

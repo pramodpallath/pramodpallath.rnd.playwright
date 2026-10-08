@@ -42,11 +42,12 @@ test('instruction placeholders become run inputs and missing values prevent a ru
     assert.equal(await page.getByLabel('UserName *', { exact: true }).evaluate(el => el === document.activeElement), true);
     await page.getByLabel('UserName *', { exact: true }).fill('Pramodpv');
     await page.locator('#add-step').click();
-    await page.locator('#step-form textarea').fill('Set city to {City}');
+    await page.locator('#step-form textarea').fill('Set city to {City} and password to {Password}');
     await page.locator('#submit-step').click();
     await page.getByLabel('City *', { exact: true }).waitFor();
     assert.equal(await page.getByLabel('UserName *', { exact: true }).inputValue(), 'Pramodpv');
     assert.equal((await store.read('inputs')).flow.inputs.City.required, true);
+    assert.equal(await page.getByLabel('Password *', { exact: true }).getAttribute('type'), 'password');
     assert.ok(!(await store.read('inputs')).source.includes('Pramodpv'));
   } finally {
     await browser.close();

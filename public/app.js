@@ -33,6 +33,7 @@ async function select(id, preserveInputs = false) {
     const label = node('label', `${name}${definition.required ? ' *' : ''}`);
     const input = document.createElement('input'); input.name = name; input.value = previous[name] ?? ''; input.autocomplete = 'off';
     input.required = definition.required;
+    if (name === 'Password') { input.type = 'password'; input.autocomplete = 'new-password'; }
     label.append(input); return label;
   }));
   renderSteps();
@@ -87,7 +88,7 @@ async function history() {
 }
 function renderRun(run) {
     $('run-status').textContent = `${run.mode} · ${run.status}${run.stepId ? ` · ${run.stepId}` : ''}`;
-    $('events').textContent = run.events.map(event => `${new Date(event.at).toLocaleTimeString()}  ${event.message}`).join('\n');
+    $('events').textContent = run.events.map(event => `${event.timestamp ?? String(Date.parse(event.at) * 1000)}  ${event.message}`).join('\n');
     $('handoff').hidden = !run.pause;
     if (run.pause && JSON.stringify(run.pause) !== lastPause) {
       lastPause = JSON.stringify(run.pause); $('pause-message').textContent = run.pause.message;
@@ -107,7 +108,12 @@ function renderRun(run) {
     $('run-artifacts').replaceChildren();
     const log = node('a', 'Open run log'); log.href = `/api/runs/${run.id}/log`; log.target = '_blank';
     $('run-artifacts').append(log);
-    if (run.events.some(event => event.message.startsWith('LLM '))) {
+    for (const entry of run.llmLogs ?? []) {
+      const llm = node('a', `${entry.timestamp ?? String(Date.parse(entry.at) * 1000)} · LLM ${entry.phase}`);
+      llm.href = `/api/runs/${run.id}/llm-logs/${encodeURIComponent(entry.file)}`; llm.target = '_blank';
+      $('run-artifacts').append(llm);
+    }
+    if (!run.llmLogs?.length && run.events.some(event => event.message.startsWith('LLM '))) {
       const llm = node('a', 'Open LLM log'); llm.href = `/api/runs/${run.id}/llm-log`; llm.target = '_blank';
       $('run-artifacts').append(llm);
     }
