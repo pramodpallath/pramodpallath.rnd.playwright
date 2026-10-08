@@ -1,14 +1,16 @@
 {
-  "name": "yaml-playwright-flows",
+  "name": "@appzone/playwright-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts serve",
     "start": "node dist/cli.js serve",
     "flow": "tsx src/cli.ts",
-    "build": "tsc",
+    "build": "tsc --declaration",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "browsers": "playwright install chromium"
@@ -25,5 +27,17 @@
     "@types/node": "^24.7.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
-  }
+  },
+  "main": "./dist/sdk.js",
+  "types": "./dist/sdk.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
