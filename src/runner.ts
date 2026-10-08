@@ -7,6 +7,7 @@ import { resolvePlan, type Resolver } from './planner.js';
 import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
 import { diagnoseAndRepair } from './discovery.js';
+import { extractTable, selectCombobox, type TableExtraction } from './controls.js';
 
 export const runLogFile = (run: { startedAt: string; id: string }) => `${run.id}.jsonl`;
 export type LlmLogFile = { timestamp?: string; at: string; phase: string; file: string };
@@ -18,7 +19,7 @@ export type RunView = {
   id: string; flowId: string; mode: 'run' | 'repair' | 'trial'; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
   stepId?: string; actionIndex?: number; events: Event[];
   pause?: { kind: 'manual' | 'before-action' | 'uncertain' | 'verify' | 'input'; message: string; choices: Decision[]; input?: string };
-  logFile?: string; llmLogs?: LlmLogFile[]; outputs: Record<string, string>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
+  logFile?: string; llmLogs?: LlmLogFile[]; outputs: Record<string, string | TableExtraction>; screenshots: Screenshot[]; startedAt: string; finishedAt?: string;
 };
 export type RunOptions = { inputs?: Record<string, string>; repairStep?: string; headless?: boolean; trial?: boolean; autoRepair?: boolean; maxRepairs?: number };
 
@@ -242,7 +243,7 @@ export class Run {
                 await locator.waitFor({ state: 'visible', timeout: step.timeoutMs });
                 await unique(locator);
                 if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
-                else if (['select', 'extract'].includes(action.type)) await ensureNonSecret(locator);
+                else if (['select', 'extract', 'extract-table', 'select-combobox'].includes(action.type)) await ensureNonSecret(locator);
                 if (action.type === 'click') await locator.click({ trial: true });
               }
               dispatched = true;
@@ -253,6 +254,14 @@ export class Run {
                 case 'select': await locate(page, action.locator).selectOption(value!); break;
                 case 'check': await locate(page, action.locator).setChecked(action.checked); break;
                 case 'wait': await waitCondition(page, action.condition, this.inputs, step.timeoutMs); break;
+                case 'select-combobox':
+                  await selectCombobox(page, action.locator, action.option, value!, action.verify);
+                  break;
+                case 'extract-table':
+                  this.view.outputs[action.output] = await extractTable(page, action.locator, {
+                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
+                  });
+                  break;
                 case 'extract': {
                   const locator = locate(page, action.locator);
                   this.view.outputs[action.output] = action.source === 'value' ? await locator.inputValue() : (await locator.innerText()).trim();
@@ -264,7 +273,7 @@ export class Run {
             } catch (error) {
               if (this.stopping) throw error;
               await this.event(`Action ${i + 1} could not complete (${dispatched ? 'after dispatch' : 'before dispatch'})`);
-              const uncertain = dispatched && !['wait', 'extract', 'fill', 'select', 'check'].includes(action.type);
+              const uncertain = dispatched && !['wait', 'extract', 'extract-table', 'fill', 'select', 'select-combobox', 'check'].includes(action.type);
               if (this.options.trial && this.options.autoRepair && !uncertain && this.repairs < (this.options.maxRepairs ?? 3)) {
                 await this.screenshot('failed');
                 try {
