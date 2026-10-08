@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { parseDocument } from 'yaml';
 import { flowSchema, instructionInputs } from './schema.js';
@@ -81,12 +81,14 @@ export class WorkflowEngine {
       catch { /* A caller can implement durable retries in its own event transport. */ }
     };
     const flush = async () => {
+      let completedSteps = run.view.events.slice(0, eventCursor).filter(e => e.message.startsWith('Completed step ')).length;
       for (const event of run.view.events.slice(eventCursor)) {
+        if (event.message.startsWith('Completed step ')) completedSteps++;
         await deliver({
           type: 'progress', runId, workflowId: flow.id,
           stepId: event.stepId, actionIndex: event.actionIndex,
           message: event.message,
-          completedSteps: run.view.events.filter(e => e.message.startsWith('Completed step ')).length,
+          completedSteps,
           totalSteps: flow.steps.length,
         });
       }
