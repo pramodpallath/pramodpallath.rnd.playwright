@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Page } from 'playwright';
-import { observe } from './browser.js';
+import { observe, locate, unique, ensureFillAllowed, ensureNonSecret } from './browser.js';
 import { resolvePlan, type Resolver, type LlmLog } from './planner.js';
 import { planSchema, type Flow, type Plan, type Step } from './schema.js';
 
@@ -55,6 +55,14 @@ export async function diagnoseAndRepair(page: Page, step: Step, flow: Flow, prev
       throw new Error('Repair proposed cross-origin navigation');
     if (action.type === 'fill' && !/^\{[A-Za-z][A-Za-z0-9_]*\}$/.test(action.value) && /password|pin|otp/i.test(JSON.stringify(action.locator)))
       throw new Error('Repair must not store sensitive values');
+  }
+  for (const action of candidate.plan.actions) {
+    if ('locator' in action) {
+      const locator = locate(page, action.locator);
+      await unique(locator);
+      if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
+      else if (action.type === 'select' || action.type === 'extract') await ensureNonSecret(locator);
+    }
   }
   return candidate;
 }
