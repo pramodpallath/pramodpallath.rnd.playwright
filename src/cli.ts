@@ -55,9 +55,14 @@ async function main() {
       if (run.view.pause) {
         const pause = run.view.pause;
         console.log(`${timestamp()} ${pause.message}`);
-        const value = pause.kind === 'input' ? await terminal.question('Value (non-secret): ') : undefined;
-        const decision = await terminal.question(`Choose ${pause.choices.join(' / ')}: `);
-        if (pause.choices.includes(decision as 'continue')) run.respond(decision as 'continue', value);
+        const controller = new AbortController();
+        const watch = setInterval(() => { if (run.view.pause !== pause) controller.abort(); }, 100);
+        try {
+          const value = pause.kind === 'input' ? await terminal.question('Value (non-secret): ', { signal: controller.signal }) : undefined;
+          const decision = await terminal.question(`Choose ${pause.choices.join(' / ')}: `, { signal: controller.signal });
+          if (run.view.pause === pause && pause.choices.includes(decision as 'continue')) run.respond(decision as 'continue', value);
+        } catch (error) { if (!controller.signal.aborted && !interrupted) throw error; }
+        finally { clearInterval(watch); }
       } else await new Promise(resolve => setTimeout(resolve, 200));
     }
     await run.finished;

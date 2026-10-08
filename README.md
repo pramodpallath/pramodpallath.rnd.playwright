@@ -64,3 +64,49 @@ the high-resolution clock and increase for successive entries, so filenames
 sort chronologically. Open individual LLM files from Run activity. Input
 values and API keys remain redacted. Older run folders and logs remain
 accessible from saved run history.
+
+Browser `ask-user` actions can skip the prompt or resume automatically when all
+`until` conditions hold together on the application page:
+
+```yaml
+steps:
+  - id: sign-in
+    instruction: Complete sign-in manually and wait for the authenticated app
+    timeoutMs: 300000
+    plan:
+      actions:
+        - type: ask-user
+          mode: browser
+          prompt: Complete sign-in and MFA in the browser.
+          graceMs: 1500
+          until:
+            - kind: origin
+              value: https://your-app.example
+            - kind: visible
+              locator:
+                target:
+                  by: testId
+                  value: authenticated-home
+      expect: []
+```
+
+Replace the example origin and locator with verified application values.
+`flows/azure-portal.yaml` uses `https://portal.azure.com` plus the supplied
+"Welcome back" text marker, allowing a name after that text, and gives sign-in
+five minutes before offering Retry or Stop. The origin alone also matches Azure's `/auth/login/` page and cannot prove
+sign-in. `origin` ignores paths, query strings, and fragments; `url` requires an
+exact URL. Conditions may also check visible/hidden controls, text, or values.
+
+An existing authenticated session continues without a pause. Silent redirects
+have a grace period (default 1500 ms) before the manual prompt appears. While
+paused, the runner monitors the original application page even if login opens a
+popup; subsequent steps remain on the verified application page. Completion in
+a replacement tab requires a flow authored for that tab. Closing the application
+page stops the run. Continue only requests another verification and cannot bypass
+`until`. On timeout, Retry starts another verification window; Stop cancels the
+run. Ordinary `ask-user` actions without `until` retain manual confirmation.
+
+The planner can produce conditional browser prompts when the instruction or
+current observation supplies completion evidence. If it cannot identify an
+authenticated control, it keeps a manual prompt rather than guessing a selector.
+Saved conditional plans replay without another LLM request.

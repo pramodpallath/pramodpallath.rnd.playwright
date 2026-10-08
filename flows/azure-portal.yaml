@@ -1,0 +1,26 @@
+version: 1
+id: azure-portal
+name: Azure Portal
+url: https://portal.azure.com/auth/login/
+profile: default
+inputs: {}
+steps:
+  - id: step-1
+    instruction: Complete SSO in the browser if needed; continue once Welcome back is visible in the Azure portal.
+    timeoutMs: 300000
+    plan:
+      actions:
+        - type: ask-user
+          mode: browser
+          prompt: Complete Azure sign-in and MFA in the browser.
+          graceMs: 1500
+          until:
+            - kind: origin
+              value: https://portal.azure.com
+            - kind: visible
+              locator:
+                target:
+                  by: text
+                  value: Welcome back
+                  exact: false
+      expect: []

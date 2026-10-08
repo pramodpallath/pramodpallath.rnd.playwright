@@ -54,7 +54,7 @@ test('username instructions resolve on the opened popup and replay without the L
     const observation = JSON.parse(request.messages[1].content).observation;
     observed = observation;
     const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Username')?.id ?? null;
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Username}', url: null, checked: null, output: null, source: null, condition: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Username}' }], unresolvedReason: null }) } }] }));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Username}', url: null, checked: null, output: null, source: null, condition: null, until: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Username}' }], unresolvedReason: null }) } }] }));
   };
   try {
     const runner = new Runner(store, directory);
@@ -282,7 +282,7 @@ test('password fill is learned from the Password input and replayed without manu
     const request = JSON.parse(String(init?.body));
     const observation = JSON.parse(request.messages[1].content).observation;
     const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Password').id;
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Password}', url: null, checked: null, output: null, source: null, condition: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Password}' }], unresolvedReason: null }) } }] }));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Password}', url: null, checked: null, output: null, source: null, condition: null, until: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Password}' }], unresolvedReason: null }) } }] }));
   };
   try {
     const runner = new Runner(store, directory);
@@ -396,7 +396,7 @@ test('LLM requests and responses are logged with secrets redacted and remain acc
     const request = JSON.parse(String(init?.body));
     const observation = JSON.parse(request.messages[1].content).observation;
     const candidate = observation.candidates.find((c: { label: string }) => c.label === 'Description').id;
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Desc}', url: null, checked: null, output: null, source: null, condition: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Desc}' }], unresolvedReason: null }) } }], debug: 'fixture-api-key supplied-value' }), { status: 200 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: [{ type: 'fill', candidate, value: '{Desc}', url: null, checked: null, output: null, source: null, condition: null, until: null, prompt: null, mode: null, input: null }], expect: [{ kind: 'value', candidate, value: '{Desc}' }], unresolvedReason: null }) } }], debug: 'fixture-api-key supplied-value' }), { status: 200 });
   };
   try {
     const run = new Runner(store, directory).start('llm-history', { headless: true, inputs: { Desc: 'supplied-value' } });

@@ -2,7 +2,7 @@ import { timestamp } from './timestamp.js';
 import { mkdir, appendFile, writeFile, rename, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { openProfile, StepPages, locate, unique, ensureNonSecret, ensureFillAllowed, waitCondition, screenshotMasks } from './browser.js';
+import { openProfile, StepPages, locate, unique, ensureNonSecret, ensureFillAllowed, waitCondition, conditionsMet, screenshotMasks } from './browser.js';
 import { resolvePlan, type Resolver } from './planner.js';
 import { interpolate, planSchema, type Flow, type Plan, type Action } from './schema.js';
 import { FlowStore, ConflictError } from './store.js';
@@ -100,14 +100,18 @@ export class Run {
     await this.closeBrowser?.();
   }
   private checkStopped() { if (this.stopping) throw new Error('Run stopped'); }
-  private async pause(pause: NonNullable<RunView['pause']>) {
+  private async pause(pause: NonNullable<RunView['pause']>, autoContinue?: () => Promise<boolean>) {
     this.checkStopped();
     await this.screenshot('paused');
     await this.event(`Paused: ${pause.kind} — ${pause.message}`);
     this.checkStopped();
     return new Promise<Decision>((resolve, reject) => {
+      let active = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       this.view.status = 'paused'; this.view.pause = { ...pause, message: this.safe(pause.message) };
       this.pending = (decision, value) => {
+        active = false;
+        clearTimeout(timer);
         this.pending = undefined;
         const input = this.view.pause?.input;
         if (input && value !== undefined) this.inputs[input] = value;
@@ -116,7 +120,43 @@ export class Run {
         else { this.view.status = 'running'; resolve(decision); }
       };
       if (this.stopping) this.pending('stop');
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const ready = await autoContinue!();
+          if (!active) return;
+          if (ready) { this.pending?.('continue'); return; }
+        } catch (error) {
+          if (!active) return;
+          active = false; clearTimeout(timer); this.pending = undefined;
+          delete this.view.pause; this.view.status = 'running'; reject(error); return;
+        }
+        timer = setTimeout(() => { void poll(); }, 100);
+      };
+      if (autoContinue && active) void poll();
     });
+  }
+  private async conditionalUser(page: Page, action: Extract<Action, { type: 'ask-user' }>, timeoutMs: number) {
+    const ready = () => conditionsMet(page, action.until!, this.inputs);
+    let deadline = Date.now() + timeoutMs;
+    const graceDeadline = Math.min(deadline, Date.now() + (action.graceMs ?? 1500));
+    while (true) {
+      this.checkStopped();
+      if (page.isClosed()) throw new Error('The application page was closed during manual completion');
+      if (await ready()) { await this.event('Manual completion conditions verified; continuing automatically'); return; }
+      if (Date.now() < graceDeadline) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
+      if (Date.now() >= deadline) {
+        await this.pause({ kind: 'verify', message: 'Manual completion timed out. Complete the browser action and retry verification, or stop. The next action has not run.', choices: ['retry', 'stop'] });
+        deadline = Date.now() + timeoutMs;
+        continue;
+      }
+      await this.pause({ kind: 'manual', message: `${action.prompt} This run continues automatically when completion is verified.`, choices: ['continue', 'stop'] }, async () => {
+        this.checkStopped();
+        if (page.isClosed()) throw new Error('The application page was closed during manual completion');
+        return Date.now() >= deadline || await ready();
+      });
+      // Continue is only a request to verify; it never bypasses the conditions.
+    }
   }
   private async execute() {
     let close: (() => Promise<void>) | undefined;
@@ -181,7 +221,11 @@ export class Run {
             this.checkStopped();
             if ((await this.store.read(flow.id)).revision !== loaded.revision) throw new ConflictError('Flow edited during run; stopped before next action');
             if (action.type === 'ask-user') {
-              await this.pause({ kind: action.mode === 'input' ? 'input' : 'manual', message: action.prompt, choices: ['continue', 'stop'], ...(action.mode === 'input' ? { input: action.input } : {}) });
+              if (action.until) {
+                await this.conditionalUser(page, action, step.timeoutMs);
+                pages.retainApplication(page);
+              }
+              else await this.pause({ kind: action.mode === 'input' ? 'input' : 'manual', message: action.prompt, choices: ['continue', 'stop'], ...(action.mode === 'input' ? { input: action.input } : {}) });
               finished = true;
               continue;
             }

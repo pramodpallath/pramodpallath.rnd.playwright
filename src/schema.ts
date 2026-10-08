@@ -18,6 +18,7 @@ const conditionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('value'), locator: locatorSchema, value: z.string() }).strict(),
   z.object({ kind: z.literal('text'), locator: locatorSchema, value: z.string() }).strict(),
   z.object({ kind: z.literal('url'), value: urlSchema }).strict(),
+  z.object({ kind: z.literal('origin'), value: urlSchema }).strict(),
 ]);
 const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('navigate'), url: urlSchema }).strict(),
@@ -27,7 +28,11 @@ const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('check'), locator: locatorSchema, checked: z.boolean() }).strict(),
   z.object({ type: z.literal('wait'), condition: conditionSchema }).strict(),
   z.object({ type: z.literal('extract'), locator: locatorSchema, output: idSchema, source: z.enum(['text', 'value']) }).strict(),
-  z.object({ type: z.literal('ask-user'), mode: z.enum(['browser', 'input']), prompt: z.string().min(1), input: idSchema.optional() }).strict().refine(a => a.mode !== 'input' || !!a.input, 'Input prompts need an input name'),
+  z.object({ type: z.literal('ask-user'), mode: z.enum(['browser', 'input']), prompt: z.string().min(1), input: idSchema.optional(),
+    until: z.array(conditionSchema).min(1).max(10).optional(), graceMs: z.number().int().min(0).max(30000).optional(),
+  }).strict().refine(a => a.mode !== 'input' || !!a.input, 'Input prompts need an input name')
+    .refine(a => a.mode === 'browser' || (!a.until && a.graceMs === undefined), 'Conditional completion requires browser mode')
+    .refine(a => a.graceMs === undefined || !!a.until, 'Grace period requires completion conditions'),
 ]);
 export const planSchema = z.object({ actions: z.array(actionSchema).min(1).max(20), expect: z.array(conditionSchema).max(10).default([]) }).strict();
 export const stepSchema = z.object({
