@@ -184,7 +184,7 @@ $('discover').onclick = guard(async () => {
   if (active || dirty) throw new Error('Save current changes and finish the active run first.');
   const field = $('discovery-message');
   if (!field.value.trim()) throw new Error('Describe the step to discover.');
-  await api(`/api/flows/${current.flow.id}/discover`, { method: 'POST', body: JSON.stringify({ message: field.value }) });
+  await api(`/api/flows/${current.flow.id}/discover`, { method: 'POST', body: JSON.stringify({ message: field.value, revision: current.revision }) });
   field.value = '';
   await select(current.flow.id, true);
 });
