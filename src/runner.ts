@@ -8,6 +8,7 @@ import { interpolate, planSchema, type Flow, type Plan, type Action } from './sc
 import { FlowStore, ConflictError } from './store.js';
 import { diagnoseAndRepair } from './discovery.js';
 import { extractTable, selectCombobox, type TableExtraction } from './controls.js';
+import { MasterDataRegistry } from './master-data.js';
 
 export const runLogFile = (run: { startedAt: string; id: string }) => `${run.id}.jsonl`;
 export type LlmLogFile = { timestamp?: string; at: string; phase: string; file: string };
@@ -243,7 +244,7 @@ export class Run {
                 await locator.waitFor({ state: 'visible', timeout: step.timeoutMs });
                 await unique(locator);
                 if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
-                else if (['select', 'extract', 'extract-table', 'select-combobox'].includes(action.type)) await ensureNonSecret(locator);
+                else if (['select', 'extract', 'extract-table', 'extract-master-data', 'select-combobox'].includes(action.type)) await ensureNonSecret(locator);
                 if (action.type === 'click') await locator.click({ trial: true });
               }
               dispatched = true;
@@ -257,6 +258,28 @@ export class Run {
                 case 'select-combobox':
                   await selectCombobox(page, action.locator, action.option, value!, action.verify);
                   break;
+                case 'extract-master-data': {
+                  const extracted = await extractTable(page, action.locator, {
+                    next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
+                  });
+                  const registry = new MasterDataRegistry(path.join(this.dataDir, 'master-data'));
+                  await registry.save({
+                    id: action.registry,
+                    sourceWorkflow: flow.id,
+                    capturedAt: new Date().toISOString(),
+                    complete: extracted.complete,
+                    pagesVisited: extracted.pagesVisited,
+                    keyColumn: action.valueColumn,
+                    labelColumn: action.labelColumn,
+                    records: extracted.rows.map(row => {
+                      if (!Object.hasOwn(row, action.valueColumn) || !Object.hasOwn(row, action.labelColumn))
+                        throw new Error('Master data column mapping does not match the extracted table');
+                      return { value: row[action.valueColumn], label: row[action.labelColumn] };
+                    }),
+                  });
+                  await this.event(`Master data ${action.registry} captured: ${extracted.rows.length} records, complete=${extracted.complete}`);
+                  break;
+                }
                 case 'extract-table':
                   this.view.outputs[action.output] = await extractTable(page, action.locator, {
                     next: action.next, maxPages: action.maxPages, maxRows: action.maxRows,
@@ -273,7 +296,7 @@ export class Run {
             } catch (error) {
               if (this.stopping) throw error;
               await this.event(`Action ${i + 1} could not complete (${dispatched ? 'after dispatch' : 'before dispatch'})`);
-              const uncertain = dispatched && !['wait', 'extract', 'extract-table', 'fill', 'select', 'select-combobox', 'check'].includes(action.type);
+              const uncertain = dispatched && !['wait', 'extract', 'extract-table', 'extract-master-data', 'fill', 'select', 'select-combobox', 'check'].includes(action.type);
               if (this.options.trial && this.options.autoRepair && !uncertain && this.repairs < (this.options.maxRepairs ?? 3)) {
                 await this.screenshot('failed');
                 try {
