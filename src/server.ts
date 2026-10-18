@@ -1,4 +1,6 @@
 import express from 'express';
+import { chromium } from 'playwright';
+import { PageModelStore, discoverPageModel } from './page-model.js';
 import path from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +35,22 @@ export function createApp(store: FlowStore, runner: Runner) {
     next();
   });
   app.get('/api/session', (_req, res) => res.json({ token }));
+  const pageModels = new PageModelStore(path.join(runner.dataDir, 'page-models'));
+  app.get('/api/page-models', async (_req, res) => res.json(await pageModels.list()));
+  app.get('/api/page-models/:id', async (req, res) => res.json(await pageModels.read(idSchema.parse(req.params.id))));
+  app.post('/api/page-models/discover', async (req, res) => {
+    const body = z.object({ id: idSchema, url: urlSchema }).strict().parse(req.body);
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+      const page = await context.newPage();
+      await page.goto(body.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const model = await discoverPageModel(page, body.id);
+      res.status(201).json(await pageModels.save(model));
+    } finally {
+      await browser.close();
+    }
+  });
   app.get('/api/flows', async (_req, res) => res.json(await store.list()));
   app.post('/api/flows', async (req, res) => {
     const body = z.object({ id: idSchema, name: z.string().min(1), url: urlSchema }).strict().parse(req.body);
