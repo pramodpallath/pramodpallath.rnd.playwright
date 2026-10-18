@@ -11,7 +11,6 @@ test('discovers actionable controls and persists validated page models', async (
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    await page.goto('http://example.com').catch(() => {});
     await page.setContent('<h1>Supplier Search</h1><label for="supplier">Supplier</label><input id="supplier"><button>Search</button><select aria-label="Status"><option value="open">Open</option></select>');
     const model = await discoverPageModel(page, 'supplier-search');
     assert.ok(model.controls.some(c => c.label === 'Supplier' && c.capabilities.includes('fill')));
