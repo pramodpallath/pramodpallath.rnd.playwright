@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { openProfile } from './browser.js';
 import type { Page, BrowserContext } from 'playwright';
 import { discoverPageModel, type PageModel, PageModelStore } from './page-model.js';
-import { locate, unique } from './browser.js';
+import { locate, unique, waitCondition } from './browser.js';
 import { planSchema, type Plan } from './schema.js';
 import { ensureFillAllowed, ensureNonSecret } from './browser.js';
 
@@ -49,6 +49,7 @@ export class AuthoringSession {
     else if (action.type === 'fill') await locator.fill(action.value);
     else if (action.type === 'select') await locator.selectOption(action.value);
     else if (action.type === 'check') await locator.setChecked(action.checked);
+    for (const condition of parsed.expect) await waitCondition(page, condition, {}, 10000);
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     const pages = this.context.pages().filter(p => !p.isClosed());
     if (pages.length === 1) this.current = pages[0];
