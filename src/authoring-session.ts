@@ -4,6 +4,7 @@ import type { Page, BrowserContext } from 'playwright';
 import { discoverPageModel, type PageModel, PageModelStore } from './page-model.js';
 import { locate, unique } from './browser.js';
 import { planSchema, type Plan } from './schema.js';
+import { ensureFillAllowed, ensureNonSecret } from './browser.js';
 
 export class AuthoringSession {
   readonly id = randomUUID();
@@ -42,6 +43,8 @@ export class AuthoringSession {
     const page = this.page;
     const locator = locate(page, action.locator);
     await unique(locator);
+    if (action.type === 'fill') await ensureFillAllowed(locator, action.value);
+    if (action.type === 'select') await ensureNonSecret(locator);
     if (action.type === 'click') await locator.click();
     else if (action.type === 'fill') await locator.fill(action.value);
     else if (action.type === 'select') await locator.selectOption(action.value);
