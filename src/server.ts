@@ -1,5 +1,6 @@
 import express from 'express';
 import { chromium } from 'playwright';
+import { AuthoringSession } from './authoring-session.js';
 import { PageModelStore, discoverPageModel } from './page-model.js';
 import path from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
@@ -84,6 +85,35 @@ export function createApp(store: FlowStore, runner: Runner) {
       instruction: body.action + ' ' + control.label + (body.value ? ' using ' + body.value : ''),
       plan, learned: { status: 'candidate', at: new Date().toISOString() } });
     return res.status(201).json(await store.save(id, document.toString(), current.revision));
+  });
+  const authoringSessions = new Map<string, AuthoringSession>();
+  app.post('/api/authoring/open', async (req, res) => {
+    const body = z.object({ flowId: idSchema, headless: z.boolean().default(false) }).strict().parse(req.body);
+    const { flow } = await store.read(body.flowId);
+    const session = await AuthoringSession.open(runner.dataDir, flow.profile, flow.url, body.headless);
+    authoringSessions.set(session.id, session);
+    res.status(201).json({ id: session.id, url: session.page.url() });
+  });
+  app.post('/api/authoring/:id/observe', async (req, res) => {
+    const session = authoringSessions.get(z.string().uuid().parse(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const body = z.object({ modelId: idSchema }).strict().parse(req.body);
+    res.json(await session.discover(body.modelId, pageModels));
+  });
+  app.post('/api/authoring/:id/preview', async (req, res) => {
+    const session = authoringSessions.get(z.string().uuid().parse(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const body = z.object({ plan: planSchema }).strict().parse(req.body);
+    await session.execute(body.plan);
+    res.json({ url: session.page.url() });
+  });
+  app.delete('/api/authoring/:id', async (req, res) => {
+    const id = z.string().uuid().parse(req.params.id);
+    const session = authoringSessions.get(id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    authoringSessions.delete(id);
+    await session.close();
+    res.status(204).end();
   });
   app.get('/api/page-models', async (_req, res) => res.json(await pageModels.list()));
   app.get('/api/page-models/:id', async (req, res) => res.json(await pageModels.read(idSchema.parse(req.params.id))));
