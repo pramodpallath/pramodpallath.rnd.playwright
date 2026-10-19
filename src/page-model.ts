@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -67,9 +67,9 @@ export class PageModelStore {
     const temporary = path.join(this.directory, `.${validated.id}-${process.pid}-${randomUUID()}.tmp`);
     try {
       await writeFile(temporary, JSON.stringify(validated, null, 2), { mode: 0o600, flag: 'wx' });
-      await (await import('node:fs/promises')).rename(temporary, filename);
+      await rename(temporary, filename);
     } finally {
-      await (await import('node:fs/promises')).unlink(temporary).catch(() => {});
+      await unlink(temporary).catch(() => {});
     }
     return validated;
   }
