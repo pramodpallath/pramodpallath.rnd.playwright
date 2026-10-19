@@ -3,6 +3,7 @@ import { openProfile } from './browser.js';
 import type { Page, BrowserContext } from 'playwright';
 import { discoverPageModel, type PageModel, PageModelStore } from './page-model.js';
 import { locate, unique, waitCondition } from './browser.js';
+import { semanticPageModel } from './semantic-page.js';
 import { planSchema, type Plan } from './schema.js';
 import { ensureFillAllowed, ensureNonSecret } from './browser.js';
 
@@ -32,7 +33,7 @@ export class AuthoringSession {
   }
   get idleMs() { return Date.now() - this.lastActivity; }
   async discover(modelId: string, store: PageModelStore): Promise<PageModel> {
-    return store.save(await discoverPageModel(this.page, modelId));
+    return store.save(await semanticPageModel(this.page, await discoverPageModel(this.page, modelId)));
   }
   async execute(plan: Plan): Promise<void> {
     const parsed = planSchema.parse(plan);
