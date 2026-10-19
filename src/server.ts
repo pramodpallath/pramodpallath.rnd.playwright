@@ -1,4 +1,7 @@
 import express from 'express';
+import { chromium } from 'playwright';
+import { AuthoringSession } from './authoring-session.js';
+import { PageModelStore, discoverPageModel } from './page-model.js';
 import path from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +10,7 @@ import { z } from 'zod';
 import { parseDocument } from 'yaml';
 import { FlowStore, ConflictError } from './store.js';
 import { Runner, type RunView } from './runner.js';
-import { idSchema, urlSchema } from './schema.js';
+import { idSchema, urlSchema, planSchema } from './schema.js';
 import { discoveryMessageSchema, trialOptionsSchema } from './discovery.js';
 import { TrialTracker } from './trials.js';
 import { decomposeInstructions } from './decomposer.js';
@@ -33,6 +36,100 @@ export function createApp(store: FlowStore, runner: Runner) {
     next();
   });
   app.get('/api/session', (_req, res) => res.json({ token }));
+  const pageModels = new PageModelStore(path.join(runner.dataDir, 'page-models'));
+  app.post('/api/flows/:id/page-model', async (req, res) => {
+    const id = idSchema.parse(req.params.id);
+    const body = z.object({ revision: z.string(), modelId: idSchema.optional() }).strict().parse(req.body);
+    const current = await store.read(id);
+    if (current.revision !== body.revision) throw new ConflictError('Flow changed; reload before discovering');
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+      const page = await context.newPage();
+      await page.goto(current.flow.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      res.status(201).json(await pageModels.save(await discoverPageModel(page, body.modelId ?? id)));
+    } finally { await browser.close(); }
+  });
+  app.post('/api/flows/:id/actions', async (req, res) => {
+    const id = idSchema.parse(req.params.id);
+    const body = z.object({
+      revision: z.string(), modelId: idSchema, controlId: idSchema,
+      action: z.enum(['click', 'fill', 'select', 'check', 'extract']),
+      value: z.string().max(4000).optional(), checked: z.boolean().optional(),
+    }).strict().parse(req.body);
+    const current = await store.read(id);
+    if (current.revision !== body.revision) throw new ConflictError('Flow changed; reload before adding an action');
+    const model = await pageModels.read(body.modelId);
+    const control = model.controls.find(c => c.id === body.controlId);
+    if (!control || !control.capabilities.includes(body.action === 'extract' ? 'read' : body.action))
+      throw new Error('Action is not supported by this control');
+    if (body.action === 'fill' || body.action === 'select') {
+      if (!body.value || !/^\\{[A-Za-z][A-Za-z0-9_]*\\}$/.test(body.value))
+        throw new Error('Use a named input placeholder such as {SupplierName}; do not store literal values');
+    }
+    if (body.action === 'check' && body.checked === undefined) throw new Error('Check requires a checked state');
+    const plan = planSchema.parse({ actions: [body.action === 'extract'
+      ? { type: 'extract', locator: control.locator, output: 'value-' + (current.flow.steps.length + 1), source: 'text' }
+      : body.action === 'check'
+        ? { type: 'check', locator: control.locator, checked: body.checked }
+        : body.action === 'click'
+          ? { type: 'click', locator: control.locator }
+          : { type: body.action, locator: control.locator, value: body.value }], expect: [] });
+    const document = parseDocument(current.source);
+    if (current.flow.steps.length === 1 && current.flow.steps[0].instruction === 'Describe your first action here' && !current.flow.steps[0].plan)
+      document.deleteIn(['steps', 0]);
+    const ids = new Set(current.flow.steps.map(s => s.id));
+    let number = current.flow.steps.length + 1;
+    while (ids.has('step-' + number)) number++;
+    document.addIn(['steps'], { id: 'step-' + number,
+      instruction: body.action + ' ' + control.label + (body.value ? ' using ' + body.value : ''),
+      plan, learned: { status: 'candidate', at: new Date().toISOString() } });
+    return res.status(201).json(await store.save(id, document.toString(), current.revision));
+  });
+  const authoringSessions = new Map<string, AuthoringSession>();
+  app.post('/api/authoring/open', async (req, res) => {
+    const body = z.object({ flowId: idSchema, headless: z.boolean().default(false) }).strict().parse(req.body);
+    const { flow } = await store.read(body.flowId);
+    const session = await AuthoringSession.open(runner.dataDir, flow.profile, flow.url, body.headless);
+    authoringSessions.set(session.id, session);
+    res.status(201).json({ id: session.id, url: session.page.url() });
+  });
+  app.post('/api/authoring/:id/observe', async (req, res) => {
+    const session = authoringSessions.get(z.string().uuid().parse(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const body = z.object({ modelId: idSchema }).strict().parse(req.body);
+    res.json(await session.discover(body.modelId, pageModels));
+  });
+  app.post('/api/authoring/:id/preview', async (req, res) => {
+    const session = authoringSessions.get(z.string().uuid().parse(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const body = z.object({ plan: planSchema }).strict().parse(req.body);
+    await session.execute(body.plan);
+    res.json({ url: session.page.url() });
+  });
+  app.delete('/api/authoring/:id', async (req, res) => {
+    const id = z.string().uuid().parse(req.params.id);
+    const session = authoringSessions.get(id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    authoringSessions.delete(id);
+    await session.close();
+    res.status(204).end();
+  });
+  app.get('/api/page-models', async (_req, res) => res.json(await pageModels.list()));
+  app.get('/api/page-models/:id', async (req, res) => res.json(await pageModels.read(idSchema.parse(req.params.id))));
+  app.post('/api/page-models/discover', async (req, res) => {
+    const body = z.object({ id: idSchema, url: urlSchema }).strict().parse(req.body);
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+      const page = await context.newPage();
+      await page.goto(body.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const model = await discoverPageModel(page, body.id);
+      res.status(201).json(await pageModels.save(model));
+    } finally {
+      await browser.close();
+    }
+  });
   app.get('/api/flows', async (_req, res) => res.json(await store.list()));
   app.post('/api/flows', async (req, res) => {
     const body = z.object({ id: idSchema, name: z.string().min(1), url: urlSchema }).strict().parse(req.body);

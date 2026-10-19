@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let token, current, runId, trialId, active = false, dirty = false, lastPause = '';
+let token, current, runId, trialId, pageModel, active = false, dirty = false, lastPause = '';
 async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', 'X-Flow-Token': token ?? '', ...options.headers } });
   const result = await response.json();
@@ -36,6 +36,9 @@ async function select(id, preserveInputs = false) {
     if (name === 'Password') { input.type = 'password'; input.autocomplete = 'new-password'; }
     label.append(input); return label;
   }));
+  pageModel = undefined;
+  $('page-controls').replaceChildren();
+  $('page-summary').textContent = '';
   renderSteps();
   await list();
   await history();
@@ -205,4 +208,44 @@ $('trial-start').onclick = guard(async () => {
     } catch (error) { notice(error.message); trialId = undefined; setActive(false); }
   };
   await tick();
+});
+
+$('page-discover').onclick = guard(async () => {
+  if (!current || active || dirty) throw new Error('Save changes and finish the run first.');
+  $('page-discover').disabled = true;
+  $('page-summary').textContent = 'Discovering controls…';
+  try {
+    pageModel = await api(`/api/flows/${current.flow.id}/page-model`, {
+      method: 'POST', body: JSON.stringify({ revision: current.revision }),
+    });
+    $('page-summary').textContent = `${pageModel.controls.length} controls discovered · ${pageModel.title}`;
+    $('page-controls').replaceChildren(...pageModel.controls.map(control => {
+      const row = node('div', '', 'page-action');
+      const title = node('strong', control.label || control.id);
+      const actions = document.createElement('div');
+      actions.className = 'inline';
+      for (const action of control.capabilities) {
+        if (!['click', 'fill', 'select', 'check', 'read'].includes(action)) continue;
+        const button = node('button', action === 'read' ? 'Extract' : action);
+        button.type = 'button';
+        button.onclick = guard(async () => {
+          if (active || dirty) throw new Error('Save your edits first.');
+          const selected = action === 'read' ? 'extract' : action;
+          const body = { revision: current.revision, modelId: pageModel.id, controlId: control.id, action: selected };
+          if (selected === 'fill' || selected === 'select') {
+            const value = window.prompt('Named input placeholder (example: {SupplierName})');
+            if (value === null) return;
+            body.value = value;
+          }
+          if (selected === 'check') body.checked = window.confirm('Set checked? OK = checked, Cancel = unchecked');
+          await api(`/api/flows/${current.flow.id}/actions`, { method: 'POST', body: JSON.stringify(body) });
+          await select(current.flow.id, true);
+          notice('Compiled action added. Run the flow to verify it.');
+        });
+        actions.append(button);
+      }
+      row.append(title, actions);
+      return row;
+    }));
+  } finally { $('page-discover').disabled = false; }
 });
